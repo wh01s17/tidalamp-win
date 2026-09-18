@@ -1,39 +1,50 @@
-# Publicar tidalamp
+# Publicar tidalamp-win
 
-Esta es la guía completa para crear una versión de tidalamp y publicarla en los tres
+Esta es la guía completa para crear una versión de tidalamp-win y publicarla en los tres
 lugares que usa el proyecto:
 
-1. **PyPI**, para instalarla con `pipx` o `pip` en distribuciones Linux.
-2. **GitHub Releases**, como página pública de la versión y sus notas.
-3. **AUR**, para instalarla en Arch Linux con todas sus dependencias del sistema.
+1. **PyPI**, para instalarla con `pipx` o `pip` en cualquier máquina que ya tenga Python.
+2. **GitHub Releases**, como página pública de la versión, sus notas y el instalador.
+3. **winget**, para instalarla en Windows sin saber que Python existe.
 
 El orden importa. Primero se prepara y valida el código, después se crea el tag —que
-publica automáticamente en PyPI—, luego se crea el GitHub Release y finalmente se
-calcula el checksum y, cuando vuelva a ser posible obtener una cuenta, se publica el
-paquete en el AUR.
+publica automáticamente en PyPI—, luego se crea el GitHub Release con el instalador
+adjunto y finalmente se calcula su checksum y se envía el manifiesto a winget. Ese
+último paso va al final por una razón mecánica: winget necesita una URL de descarga
+estable y el `sha256` del fichero que está detrás de ella, así que no se puede preparar
+antes de que el instalador exista y esté publicado.
 
-> [!IMPORTANT]
-> **Estado a 2026-09-17:** hay dieciocho versiones publicadas en PyPI, hasta `0.13.0`,
-> con Trusted Publishing, cada una con su GitHub Release. El environment `pypi` de GitHub existe y el publisher de PyPI ya
-> no está pendiente: se convirtió en uno normal con la primera publicación, así que
-> §1.2 y §1.3 quedan como registro de cómo se configuró y no como pasos a repetir. La
-> publicación en el AUR sigue aplazada por una causa externa:
-> [el registro público de cuentas nuevas continúa cerrado](https://lists.archlinux.org/archives/list/aur-general%40lists.archlinux.org/message/2IJD5MFHSLXARQTOP4FH64CJLW2BIIGC/)
-> durante el endurecimiento de seguridad posterior a
-> [la oleada de paquetes maliciosos](https://lists.archlinux.org/archives/list/aur-general%40lists.archlinux.org/message/4JRS73YVTE7JUYHHE3ZDUIHXYHXZ3YQQ/).
-> No se ha anunciado una fecha de reapertura y el mantenedor no tiene una cuenta
-> anterior. Esto no bloquea PyPI ni GitHub Releases: el lanzamiento puede continuar
-> por esos dos canales y completar el AUR más adelante.
+> [!WARNING]
+> **Nada de esto se ha ejecutado todavía.** tidalamp-win es un port en curso y no tiene
+> ninguna versión publicada en ningún canal. Este documento describe **el procedimiento
+> previsto**, adaptado del de upstream, no uno que se haya recorrido.
+>
+> Concretamente, y para que nadie lo dé por hecho:
+>
+> - **El Trusted Publishing de PyPI está sin configurar.** El de upstream está atado a
+>   `wh01s17/tidalamp` y no sirve aquí: hay que dar de alta el proyecto `tidalamp-win`
+>   (§1.3). Si no se hace, el job `publish` falla en el primer tag con un error de OIDC,
+>   no con uno de credenciales, que es un error mucho más confuso de diagnosticar.
+> - **No existe el instalador**, ni el `.spec` de PyInstaller que lo produce. Es F6 de
+>   [`windows.md`](./windows.md) §4.
+> - **`release.yml` viene de upstream** y todavía no se ha comprobado en este
+>   repositorio.
+>
+> Y lo más importante: **no hay nada que publicar hasta cerrar F2 como mínimo**, y en la
+> práctica hasta F4. La versión `0.13.0` del `pyproject.toml` es la heredada y describe
+> un árbol Linux.
 
-Los ejemplos usan `0.1.0`, que fue la primera. En versiones posteriores hay que
-sustituirlo por la que toque.
+Los ejemplos usan `0.1.0`. Sustituir por la versión que toque.
 
-```sh
-TIDALAMP_VERSION=0.1.0
-TIDALAMP_TAG="v${TIDALAMP_VERSION}"
+```powershell
+$env:TIDALAMP_VERSION = "0.1.0"
+$env:TIDALAMP_TAG = "v$env:TIDALAMP_VERSION"
 ```
 
-Mantén esas variables en la misma terminal durante todo el proceso.
+Mantén esas variables en la misma terminal durante todo el proceso. Los bloques de esta
+guía van en PowerShell salvo donde se diga otra cosa; los pasos que corren dentro de
+GitHub Actions siguen siendo shell POSIX, porque `release.yml` se queda en un runner
+Linux (§6) — sólo construye un wheel puro y no gana nada con Windows.
 
 ## 1. Configuración inicial — sólo antes de la primera publicación
 
@@ -41,10 +52,12 @@ Mantén esas variables en la misma terminal durante todo el proceso.
 
 La persona que publica necesita:
 
-- permisos de escritura en `https://github.com/wh01s17/tidalamp`;
+- permisos de escritura en `https://github.com/wh01s17/tidalamp-win`;
 - una cuenta verificada en PyPI;
-- una cuenta en el AUR y una clave SSH asociada;
-- una máquina Arch Linux para probar y publicar el `PKGBUILD`.
+- una cuenta de GitHub para el pull request a `microsoft/winget-pkgs`;
+- **una máquina Windows**, para construir el instalador, correr la suite y mirar el TUI.
+  Los pasos §1–§7 salen adelante desde cualquier sistema; §8 y la comprobación final de
+  §9, no.
 
 No se necesita guardar un token de PyPI en GitHub. El workflow usa Trusted Publishing
 con OIDC.
@@ -55,7 +68,7 @@ con OIDC.
 `wh01s17`, no permite saltarse las reglas de protección y no contiene secretos. Los
 pasos siguientes conservan la configuración exacta para poder auditarla o recrearla.
 
-1. Abre `https://github.com/wh01s17/tidalamp`.
+1. Abre `https://github.com/wh01s17/tidalamp-win`.
 2. Entra en **Settings → Environments**.
 3. Pulsa **New environment**.
 4. Escribe exactamente `pypi` y pulsa **Configure environment**.
@@ -72,9 +85,9 @@ El nombre debe coincidir con `environment: pypi` en
 
 ### 1.3. Registrar el pending publisher en PyPI
 
-**Completado el 2026-09-09.** PyPI muestra el publisher pendiente con los cinco valores
-de la tabla siguiente. Como `tidalamp` todavía no existe en PyPI, se conservará como
-pendiente hasta que el workflow publique por primera vez:
+**Sin hacer.** El publisher de upstream está atado a `wh01s17/tidalamp` y no cubre este
+repositorio: PyPI empareja el token OIDC con *owner + repo + workflow + environment*, y
+tres de esos cuatro cambian. Hay que registrar uno nuevo.
 
 1. Inicia sesión en `https://pypi.org/`.
 2. Abre **Account settings → Publishing**.
@@ -83,71 +96,71 @@ pendiente hasta que el workflow publique por primera vez:
 
    | Campo de PyPI | Valor |
    |---|---|
-   | PyPI project name | `tidalamp` |
+   | PyPI project name | `tidalamp-win` |
    | Owner | `wh01s17` |
-   | Repository name | `tidalamp` |
+   | Repository name | `tidalamp-win` |
    | Workflow name | `release.yml` |
    | Environment name | `pypi` |
 
 5. Guarda el publisher.
 
-Un pending publisher no crea el proyecto ni reserva su nombre. Conviene hacer este
-paso inmediatamente antes de la primera publicación. Cuando el workflow publique por
-primera vez, PyPI creará el proyecto y convertirá el publisher pendiente en uno normal.
+Un pending publisher no crea el proyecto ni reserva su nombre. Conviene hacer este paso
+inmediatamente antes de la primera publicación. Cuando el workflow publique por primera
+vez, PyPI creará el proyecto y convertirá el publisher pendiente en uno normal.
 
-### 1.4. Preparar la cuenta y la clave SSH del AUR
+> [!NOTE]
+> El nombre en PyPI es `tidalamp-win`; **el módulo importable y el comando se siguen
+> llamando `tidalamp`**. No es un descuido: es lo que mantiene aplicables los diffs de
+> upstream (`windows.md` §5.14). Lo único que hay que vigilar es que
+> `[tool.hatch.build.targets.wheel] packages = ["tidalamp"]` no se «corrija» a
+> `tidalamp_win` en algún momento, porque entonces el wheel deja de instalar el paquete
+> que el código importa.
 
-> [!WARNING]
-> Este paso está bloqueado para quien no tenga ya una cuenta: el AUR mantiene cerrado
-> el registro público de usuarios nuevos y no ofrece una cola de alta manual. Detente
-> aquí y retoma esta sección sólo cuando el proyecto anuncie oficialmente la
-> reapertura. No uses una cuenta ajena ni intentes eludir el cierre.
+### 1.4. Preparar el instalador y la cuenta de winget
 
-1. Crea o abre tu cuenta en `https://aur.archlinux.org/`.
-2. Genera una clave dedicada para el AUR:
+A diferencia del AUR, winget no pide cuenta propia: los manifiestos se envían por pull
+request a `microsoft/winget-pkgs` con la cuenta de GitHub que ya tienes. Lo que sí hace
+falta es tener algo que instalar.
 
-   ```sh
-   ssh-keygen -t ed25519 -f ~/.ssh/aur
+1. **Construir el instalador.** Dos piezas, en este orden, y ninguna existe todavía:
+   - PyInstaller produce el ejecutable único, desde `packaging/windows/tidalamp.spec`.
+     Hay que declarar como `datas` los `.tcss` de `tidalamp/styles/` y el `.ico`:
+     PyInstaller no los encuentra solo y Textual falla en el arranque sin su hoja de
+     estilos.
+   - Inno Setup lo envuelve en un `.exe` de instalación que además crea el acceso
+     directo del menú Inicio.
+2. **Que desinstale limpio.** La validación automática de winget instala y desinstala
+   el paquete en una máquina limpia, así que el instalador tiene que ser silencioso
+   (`/VERYSILENT`) y no dejar nada detrás.
+3. **Instalar `wingetcreate`**, que genera y actualiza los manifiestos sin escribir los
+   tres YAML a mano:
+
+   ```powershell
+   winget install Microsoft.WingetCreate
    ```
 
-3. Copia el contenido de `~/.ssh/aur.pub` en **My Account → SSH Public Key** dentro
-   del AUR.
-4. Añade esta entrada a `~/.ssh/config`:
-
-   ```sshconfig
-   Host aur.archlinux.org
-     IdentityFile ~/.ssh/aur
-     User aur
-   ```
-
-5. Comprueba la autenticación:
-
-   ```sh
-   ssh -T aur@aur.archlinux.org
-   ```
-
-El AUR publica el nombre y correo configurados en los commits. Si no quieres usar tu
-identidad global, configura otra localmente en el clon del AUR antes de crear el primer
-commit.
+4. **Tener el repositorio bifurcado.** `wingetcreate submit` abre el pull request contra
+   tu fork de `microsoft/winget-pkgs`; la primera vez pedirá autorizarse con GitHub.
 
 ### 1.5. Herramientas locales
 
 El entorno Python de desarrollo necesita el proyecto y sus extras:
 
-```sh
+```powershell
 python -m venv .venv
-.venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install -e ".[dev]" build twine
+.venv\Scripts\python -m pip install --upgrade pip
+.venv\Scripts\python -m pip install -e ".[dev]" build twine
 ```
 
-En Arch, las herramientas del paquete se instalan con:
+Y las herramientas de empaquetado:
 
-```sh
-sudo pacman -S --needed base-devel pacman-contrib namcap git
+```powershell
+winget install Microsoft.WingetCreate
+winget install JRSoftware.InnoSetup
+.venv\Scripts\python -m pip install pyinstaller
 ```
 
-`updpkgsums` pertenece a `pacman-contrib`. `gh`, la CLI de GitHub, es opcional; todos
-sus pasos tienen una alternativa desde la web.
+`gh`, la CLI de GitHub, es opcional; todos sus pasos tienen una alternativa desde la web.
 
 ## 2. Elegir la versión
 
@@ -159,20 +172,20 @@ tidalamp sigue versionado semántico `MAJOR.MINOR.PATCH`:
 
 Antes de usar una versión, confirma que no existe como tag ni en PyPI:
 
-```sh
+```powershell
 git fetch origin --tags
-git tag --list "$TIDALAMP_TAG"
+git tag --list $env:TIDALAMP_TAG
 ```
 
 El segundo comando no debe imprimir nada. Comprueba también
-`https://pypi.org/project/tidalamp/`. PyPI no permite reemplazar los archivos de una
-versión que ya fue publicada.
+`https://pypi.org/project/tidalamp-win/`. PyPI no permite reemplazar los archivos de
+una versión que ya fue publicada.
 
 ## 3. Preparar el repositorio
 
 ### 3.1. Partir de `main` actualizado y limpio
 
-```sh
+```powershell
 git switch main
 git pull --ff-only origin main
 git status --short
@@ -183,11 +196,12 @@ pertenezcan a esa versión.
 
 ### 3.2. Actualizar los números de versión
 
-La versión vive en **cinco** sitios. `release.yml` sólo compara el tag con el primero,
+La versión vive en **cuatro** sitios. `release.yml` sólo compara el tag con el primero,
 y `tests/test_about.py::test_every_copy_of_the_version_agrees` ata los otros dos que
-son de Python: si alguno se queda atrás, la suite falla antes de llegar al tag. Los dos
-últimos —el `?v=` del README y el `PKGBUILD`— no los comprueba nadie más que esta
-sección.
+son de Python: si alguno se queda atrás, la suite falla antes de llegar al tag. El
+último —el `?v=` del README— no lo comprueba nadie más que esta sección.
+
+*Upstream tenía cinco; el quinto era `pkgver` del PKGBUILD del AUR, que aquí no existe.*
 
 1. En `pyproject.toml`:
 
@@ -227,10 +241,15 @@ sección.
 
 4. En `README.md`, el `?v=` de las URLs de `img/`:
 
-   ```sh
-   sed -i -E 's/\?v=[0-9.]+(["\)])/?v='"$TIDALAMP_VERSION"'\1/g' README.md
-   rg -c 'v=' README.md   # cuenta las URLs; compárala con las que quedaron sin tocar
+   ```powershell
+   $v = $env:TIDALAMP_VERSION
+   (Get-Content README.md -Raw) -replace '\?v=[0-9.]+(["\)])', "?v=$v`$1" |
+     Set-Content README.md -NoNewline
+   (Select-String -Path README.md -Pattern '\?v=' -AllMatches).Matches.Count
    ```
+
+   El último comando cuenta las URLs con token de versión; compáralo con las que
+   quedaron sin tocar (`Select-String '\?v=' README.md` las lista).
 
    Las dos clases de enlace tienen que entrar: las de `<img src="...">`, que
    acaban en comilla, y las de `![alt](...)` de Markdown, que acaban en
@@ -243,16 +262,9 @@ sección.
    lo que la invalida. Si en esta versión no cambió ninguna imagen, da igual
    actualizarlo.
 
-5. En `packaging/aur/PKGBUILD`:
-
-   ```sh
-   pkgver=0.1.0
-   pkgrel=1
-   ```
-
-`pkgrel` vuelve a `1` cada vez que cambia `pkgver`. Si sólo se corrige el empaquetado
-del AUR sin publicar una versión nueva de la aplicación, se conserva `pkgver` y se
-incrementa únicamente `pkgrel`.
+El manifiesto de winget **no** se actualiza aquí: lleva su propia versión y su propio
+`sha256`, y ninguno de los dos se puede calcular hasta que el instalador esté publicado.
+Va en §8.
 
 ### 3.3. Cerrar el changelog
 
@@ -278,16 +290,20 @@ que el resumen de `about.releases()` (paso 3.2) diga lo mismo en corto: son dos 
 para dos públicos —el changelog completo y las cuatro líneas que caben en la pantalla
 de ayuda— y no deben contradecirse.
 
-### 3.4. Regenerar `.SRCINFO`
+### 3.4. Comprobar que no queda nada del AUR
 
-```sh
-cd packaging/aur
-makepkg --printsrcinfo > .SRCINFO
-cd ../..
+Upstream tenía aquí un paso para regenerar `.SRCINFO` con `makepkg`. En este proyecto no
+aplica, y lo que queda en su lugar es una comprobación: que `packaging/aur/` ya no
+exista, o que si existe no lo referencie nadie.
+
+```powershell
+Test-Path packaging\aur
+Select-String -Path pyproject.toml,packaging\README.md -Pattern 'aur|PKGBUILD|SRCINFO'
 ```
 
-Antes del primer tag es normal que todavía diga `sha256sums = SKIP`. El hash definitivo
-se añadirá en la sección del AUR, cuando GitHub ya pueda generar el tarball del tag.
+Si `pyproject.toml` sigue incluyendo `packaging/` en el `sdist`, revisa que apunte a
+`packaging/windows/` y no arrastre la receta de Arch dentro del tarball que se sube a
+PyPI.
 
 ## 4. Validar la versión antes de etiquetarla
 
@@ -295,31 +311,35 @@ se añadirá en la sección del AUR, cuando GitHub ya pueda generar el tarball d
 
 Ejecuta todas las comprobaciones desde la raíz del repositorio:
 
-```sh
-.venv/bin/ruff check tidalamp tests
-.venv/bin/ruff format --check tidalamp tests
-.venv/bin/mypy tidalamp
-.venv/bin/python -m pytest -q
+```powershell
+.venv\Scripts\ruff check tidalamp tests
+.venv\Scripts\ruff format --check tidalamp tests
+.venv\Scripts\mypy tidalamp
+.venv\Scripts\python -m pytest -q
 git diff --check
 ```
+
+`mypy` necesita `platform = "win32"` en su configuración. Sin eso valida las ramas del
+sistema equivocado y se salta las que sí existen aquí (`windows.md` §5.14).
 
 No continúes si alguna falla.
 
 Si la única que falla es `test_the_version_is_the_one_the_package_declares`, no es la
 versión sino la instalación: la editable guarda la metadata de cuando se instaló y
 sigue diciendo el número anterior hasta reinstalarla con
-`.venv/bin/python -m pip install -e ".[dev]"`. Pasó al preparar la `0.6.0`.
+`.venv\Scripts\python -m pip install -e ".[dev]"`. Pasó al preparar la `0.6.0` en
+upstream, y la causa no cambia con el sistema.
 
 ### 4.2. Construir y revisar los artefactos
 
 Usa un directorio temporal nuevo para no validar por accidente archivos de una versión
 anterior:
 
-```sh
-TIDALAMP_BUILD_DIR="$(mktemp -d)"
-.venv/bin/python -m build --outdir "$TIDALAMP_BUILD_DIR"
-.venv/bin/python -m twine check "$TIDALAMP_BUILD_DIR"/*
-ls -lh "$TIDALAMP_BUILD_DIR"
+```powershell
+$env:TIDALAMP_BUILD_DIR = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP (New-Guid))).FullName
+.venv\Scripts\python -m build --outdir $env:TIDALAMP_BUILD_DIR
+.venv\Scripts\python -m twine check "$env:TIDALAMP_BUILD_DIR\*"
+Get-ChildItem $env:TIDALAMP_BUILD_DIR
 ```
 
 Deben existir exactamente un `sdist` (`.tar.gz`) y un wheel (`.whl`) de la versión
@@ -327,21 +347,25 @@ elegida, y ambos deben pasar `twine check`.
 
 Comprueba además que el wheel se instala en un entorno vacío:
 
-```sh
-TIDALAMP_TEST_VENV="$(mktemp -d)"
-python -m venv "$TIDALAMP_TEST_VENV"
-"$TIDALAMP_TEST_VENV/bin/pip" install "$TIDALAMP_BUILD_DIR"/tidalamp-*.whl
-"$TIDALAMP_TEST_VENV/bin/tidalamp" --help
+```powershell
+$venv = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP (New-Guid))).FullName
+python -m venv $venv
+& "$venv\Scripts\pip" install (Get-ChildItem "$env:TIDALAMP_BUILD_DIR\tidalamp*.whl").FullName
+& "$venv\Scripts\tidalamp" --help
 ```
 
-Esta comprobación no instala `mpv`; `tidalamp --help` no lo necesita. La reproducción
-real sí requiere `mpv` instalado en el sistema.
+Esta comprobación no instala `mpv`; `tidalamp --help` no lo necesita — es eager a
+propósito, para que funcione en la instalación que está rota. La reproducción real sí
+requiere `mpv` en el sistema.
+
+El wheel se llama `tidalamp_win-X.Y.Z-...whl` aunque el paquete que instala se importe
+como `tidalamp`: PyPI normaliza el guion del nombre de distribución a guion bajo.
 
 ## 5. Crear y subir el commit de la versión
 
 Revisa todas las diferencias antes de confirmar:
 
-```sh
+```powershell
 git diff
 git diff --check
 git status --short
@@ -349,22 +373,15 @@ git status --short
 
 Añade los archivos de la versión, crea el commit y sube `main`:
 
-```sh
-git add \
-  CHANGELOG.md \
-  README.md \
-  pyproject.toml \
-  tidalamp/__init__.py \
-  tidalamp/about.py \
-  packaging/aur/PKGBUILD \
-  packaging/aur/.SRCINFO
-git commit -m "chore(release): prepare ${TIDALAMP_TAG}"
+```powershell
+git add CHANGELOG.md README.md pyproject.toml tidalamp/__init__.py tidalamp/about.py
+git commit -m "chore(release): prepare $env:TIDALAMP_TAG"
 git push origin main
 ```
 
-Esos siete nombres cubren todas las copias de la versión, la fecha y las notas, además
-del paquete del AUR. Si la versión también contiene otros archivos ya revisados, deben
-incluirse en el commit correspondiente antes de crear el tag.
+Esos cinco nombres cubren todas las copias de la versión, la fecha y las notas. Si la
+versión también contiene otros archivos ya revisados, deben incluirse en el commit
+correspondiente antes de crear el tag.
 
 En GitHub, abre **Actions → CI** y espera a que el commit de `main` termine en verde.
 No crees el tag sobre un commit cuyo CI no haya finalizado correctamente.
@@ -377,23 +394,22 @@ Antes de crear el tag, confirma:
 
 - que el environment `pypi` existe en GitHub;
 - que el pending publisher de PyPI usa exactamente los cinco valores de la sección
-  1.3;
+  1.3, **y que dicen `tidalamp-win` y no `tidalamp`**;
 - que `main` está sincronizado y limpio;
 - que la versión de `pyproject.toml` es idéntica al tag sin la `v`.
 
-```sh
+```powershell
 git status --short --branch
 git log -1 --oneline
-rg '^version = ' pyproject.toml
-rg '^pkgver=' packaging/aur/PKGBUILD
+Select-String -Path pyproject.toml -Pattern '^version = '
 ```
 
 ### 6.2. Crear y subir sólo el tag deseado
 
-```sh
-git tag -a "$TIDALAMP_TAG" -m "tidalamp ${TIDALAMP_VERSION}"
-git show --no-patch "$TIDALAMP_TAG"
-git push origin "$TIDALAMP_TAG"
+```powershell
+git tag -a $env:TIDALAMP_TAG -m "tidalamp-win $env:TIDALAMP_VERSION"
+git show --no-patch $env:TIDALAMP_TAG
+git push origin $env:TIDALAMP_TAG
 ```
 
 Evita `git push --tags`: podría subir tags locales que no pretendías publicar.
@@ -413,26 +429,26 @@ requiere aprobación, aprueba el job `publish` cuando aparezca como pendiente.
 
 Con GitHub CLI se puede consultar y seguir la ejecución:
 
-```sh
+```powershell
 gh run list --workflow release.yml --limit 5
 gh run watch ID_DE_LA_EJECUCION
 ```
 
-No continúes con el anuncio ni con el AUR hasta que los jobs `build` y `publish` estén
-en verde.
+No continúes con el anuncio ni con el instalador hasta que los jobs `build` y `publish`
+estén en verde.
 
 ### 6.4. Verificar PyPI desde cero
 
-Abre `https://pypi.org/project/tidalamp/` y confirma la versión, descripción, README,
+Abre `https://pypi.org/project/tidalamp-win/` y confirma la versión, descripción, README,
 licencia, versión mínima de Python y enlaces del proyecto.
 
 Prueba lo que recibirá un usuario, descargándolo desde PyPI en otro entorno vacío:
 
-```sh
-TIDALAMP_PYPI_VENV="$(mktemp -d)"
-python -m venv "$TIDALAMP_PYPI_VENV"
-"$TIDALAMP_PYPI_VENV/bin/pip" install "tidalamp[art]==${TIDALAMP_VERSION}"
-"$TIDALAMP_PYPI_VENV/bin/tidalamp" --help
+```powershell
+$venv = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP (New-Guid))).FullName
+python -m venv $venv
+& "$venv\Scripts\pip" install "tidalamp-win[art]==$env:TIDALAMP_VERSION"
+& "$venv\Scripts\tidalamp" --help
 ```
 
 ## 7. Crear el GitHub Release
@@ -443,7 +459,7 @@ página pública con las notas de la versión. GitHub añadirá automáticamente
 
 ### 7.1. Desde la web
 
-1. Abre `https://github.com/wh01s17/tidalamp/releases`.
+1. Abre `https://github.com/wh01s17/tidalamp-win/releases`.
 2. Pulsa **Draft a new release**.
 3. En **Choose a tag**, selecciona el tag que ya se publicó: `vX.Y.Z`.
 4. Usa como título `tidalamp X.Y.Z`.
@@ -463,10 +479,10 @@ tag que activó la publicación de PyPI.
 
 Para generar notas desde los commits:
 
-```sh
-gh release create "$TIDALAMP_TAG" \
-  --verify-tag \
-  --title "tidalamp ${TIDALAMP_VERSION}" \
+```powershell
+gh release create $env:TIDALAMP_TAG `
+  --verify-tag `
+  --title "tidalamp-win $env:TIDALAMP_VERSION" `
   --generate-notes
 ```
 
@@ -478,139 +494,139 @@ Si preparaste las notas en un archivo, sustituye `--generate-notes` por
 PyPI ya hospeda los paquetes y GitHub ya ofrece el código fuente. Si también quieres
 que el wheel y el sdist aparezcan como assets del Release:
 
-```sh
-gh run download ID_DE_LA_EJECUCION \
-  --name dist \
-  --dir "dist/release-${TIDALAMP_VERSION}"
-gh release upload "$TIDALAMP_TAG" "dist/release-${TIDALAMP_VERSION}"/*
+```powershell
+gh run download ID_DE_LA_EJECUCION `
+  --name dist `
+  --dir "dist\release-$env:TIDALAMP_VERSION"
+gh release upload $env:TIDALAMP_TAG (Get-ChildItem "dist\release-$env:TIDALAMP_VERSION").FullName
 ```
 
-El AUR no necesita estos assets: usa el tarball automático del tag.
+Lo que **sí** tiene que estar adjunto al Release es el instalador: winget descarga desde
+esa URL y resume ese fichero (§8.3). El wheel y el sdist son opcionales.
 
-## 8. Finalizar y publicar el paquete AUR
+## 8. Construir el instalador y publicar en winget
 
-Esta sección se ejecuta en Arch Linux después de que el tag sea público.
+Este es el único tramo que **no** se puede preparar por adelantado. winget empareja una
+URL de descarga con el `sha256` del fichero que hay detrás, así que el orden es rígido:
+construir, adjuntar al Release, calcular el hash de lo adjuntado, y sólo entonces
+escribir el manifiesto. Invertir cualquier par de pasos produce un manifiesto que la
+validación rechaza.
 
-El cierre del registro no impide ejecutar §8.1–§8.3: se puede calcular el checksum,
-probar el paquete localmente y guardar esos metadatos en el repositorio principal. Sin
-una cuenta anterior del AUR, §8.4–§8.6 quedan en pausa hasta que se reabra el registro.
-PyPI y el GitHub Release no tienen que esperar al AUR.
+### 8.1. Construir el ejecutable y el instalador
 
-### 8.1. Calcular el checksum definitivo
-
-Actualiza `main` y entra al directorio del paquete:
-
-```sh
-git switch main
-git pull --ff-only origin main
-cd packaging/aur
-updpkgsums
-makepkg --printsrcinfo > .SRCINFO
+```powershell
+.venv\Scripts\pyinstaller packaging\windows\tidalamp.spec --clean --noconfirm
+& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" packaging\windows\tidalamp.iss
 ```
 
-Comprueba que ni `PKGBUILD` ni `.SRCINFO` conserven `SKIP`:
+Dos cosas que hay que verificar a ojo antes de seguir, porque ninguna da error:
 
-```sh
-rg '^[[:space:]]*sha256sums' PKGBUILD .SRCINFO
+- **Que el ejecutable arranca en una máquina sin Python.** Un PyInstaller que olvidó los
+  `.tcss` de `tidalamp/styles/` construye sin quejarse y falla al abrir la interfaz, que
+  es el peor momento para enterarse.
+- **Que el `.ico` está dentro.** Sin él el acceso directo sale con el icono genérico.
+
+### 8.2. Probar la instalación y la desinstalación
+
+La validación de winget instala y desinstala en una máquina limpia. Hacerlo antes, en
+una máquina virtual o en un usuario nuevo, cuesta menos que un pull request rechazado:
+
+```powershell
+.\Output\tidalamp-win-$env:TIDALAMP_VERSION-setup.exe /VERYSILENT
+tidalamp --version
+# y después, desde Aplicaciones instaladas o:
+# "%ProgramFiles%\tidalamp-win\unins000.exe" /VERYSILENT
 ```
 
-Las líneas encontradas deben contener un hash SHA-256 real, no `SKIP`.
+Comprueba que la desinstalación se lleva el acceso directo del menú Inicio y **no** se
+lleva `%APPDATA%\tidalamp` — la sesión y la configuración del usuario no son del
+instalador. Eso lo borra «Cerrar sesión» desde la propia aplicación, con su casilla.
 
-### 8.2. Construir, ejecutar los tests e instalar localmente
+### 8.3. Adjuntar el instalador al GitHub Release
 
-```sh
-makepkg -Csi
-namcap PKGBUILD
-namcap tidalamp-*.pkg.tar.zst
-tidalamp --help
-pacman -Qi tidalamp
+Desde la web, o con la CLI:
+
+```powershell
+gh release upload $env:TIDALAMP_TAG `
+  ".\Output\tidalamp-win-$env:TIDALAMP_VERSION-setup.exe"
 ```
 
-`makepkg -Csi` limpia restos de compilaciones anteriores, instala las dependencias,
-construye el paquete, ejecuta `check()` e instala el resultado. Revisa todos los avisos
-de `namcap`; algunos pueden ser informativos, pero no publiques con errores reales de
-dependencias, rutas o metadatos.
+**Este fichero no se vuelve a tocar.** Si hay que reconstruirlo, cambia el hash y hay
+que rehacer el manifiesto de winget aunque la versión sea la misma.
 
-### 8.3. Guardar el checksum en el repositorio principal
+### 8.4. Calcular el checksum de lo publicado
 
-`updpkgsums` cambia archivos después del tag porque el tarball no existía antes. Guarda
-el resultado en `main`; no muevas el tag:
+Del fichero que está detrás de la URL pública, no del que quedó en `Output\`. Descarga
+y resume:
 
-```sh
-cd ../..
-git add packaging/aur/PKGBUILD packaging/aur/.SRCINFO
-git commit -m "build(aur): finalize ${TIDALAMP_TAG} checksum"
-git push origin main
+```powershell
+$url = "https://github.com/wh01s17/tidalamp-win/releases/download/$env:TIDALAMP_TAG/tidalamp-win-$env:TIDALAMP_VERSION-setup.exe"
+Invoke-WebRequest $url -OutFile verify.exe
+(Get-FileHash verify.exe -Algorithm SHA256).Hash
 ```
 
-Es correcto que este commit sea posterior al tag. El AUR recibe el `PKGBUILD` nuevo,
-pero el código de la aplicación continúa siendo exactamente el del tag.
+Comparar ese hash con el del fichero local es además la comprobación de que la subida no
+se corrompió.
 
-### 8.4. Crear el repositorio del paquete en el AUR
+### 8.5. Generar y enviar el manifiesto
 
-El repositorio AUR debe estar separado del repositorio principal. Desde la raíz de
-tidalamp:
+La primera versión crea el paquete; las siguientes lo actualizan.
 
-```sh
-TIDALAMP_AUR_DIR="../aur-tidalamp"
-git -c init.defaultBranch=master clone \
-  ssh://aur@aur.archlinux.org/tidalamp.git \
-  "$TIDALAMP_AUR_DIR"
+```powershell
+# primera vez
+wingetcreate new $url
+
+# versiones posteriores
+wingetcreate update wh01s17.tidalamp-win --version $env:TIDALAMP_VERSION --urls $url
 ```
 
-En la primera publicación es normal recibir el aviso de que el repositorio está vacío.
-El AUR sólo acepta pushes a la rama `master`.
+`wingetcreate` rellena los tres YAML (`version`, `installer`, `locale`), calcula el
+hash por su cuenta y abre el pull request contra `microsoft/winget-pkgs`. Guarda una
+copia de los manifiestos en `packaging/windows/manifests/` para tener en el repositorio
+lo que se envió.
 
-Si el clon ya existe de una publicación anterior, no lo vuelvas a clonar:
+Antes de enviar, revisa a mano el `PackageIdentifier` (`wh01s17.tidalamp-win`), la
+licencia (`GPL-3.0-or-later`) y la descripción corta, que es lo que ve quien hace
+`winget search`. Y que el `ShortDescription` mencione mpv: es la única dependencia que
+el instalador no trae y el sitio donde más se va a leer.
 
-```sh
-TIDALAMP_AUR_DIR="../aur-tidalamp"
-git -C "$TIDALAMP_AUR_DIR" pull --ff-only origin master
+### 8.6. Verificar winget
+
+El pull request pasa por validación automática y, a veces, por revisión humana; puede
+tardar de horas a días. Cuando se fusione:
+
+```powershell
+winget search tidalamp
+winget install wh01s17.tidalamp-win
+tidalamp --version
 ```
 
-### 8.5. Copiar, revisar y subir `PKGBUILD` y `.SRCINFO`
-
-```sh
-cp packaging/aur/PKGBUILD "$TIDALAMP_AUR_DIR/PKGBUILD"
-cp packaging/aur/.SRCINFO "$TIDALAMP_AUR_DIR/.SRCINFO"
-git -C "$TIDALAMP_AUR_DIR" add PKGBUILD .SRCINFO
-git -C "$TIDALAMP_AUR_DIR" diff --cached
-git -C "$TIDALAMP_AUR_DIR" commit -m "tidalamp ${TIDALAMP_VERSION}"
-git -C "$TIDALAMP_AUR_DIR" push origin master
-```
-
-`PKGBUILD` y `.SRCINFO` deben estar en el mismo commit. No subas el repositorio
-principal completo al AUR.
-
-### 8.6. Verificar el AUR
-
-1. Abre `https://aur.archlinux.org/packages/tidalamp`.
-2. Comprueba versión, `pkgrel`, descripción, URL, licencia, dependencias y checksum.
-3. En una instalación limpia o después de eliminar la copia local, comprueba el flujo
-   normal de usuario:
-
-   ```sh
-   yay -S tidalamp
-   tidalamp --help
-   ```
+Si la validación falla, el bot comenta en el pull request con el motivo. Los dos motivos
+habituales son un instalador que no desinstala limpio (§8.2) y un hash que no coincide
+porque se reconstruyó el binario después de calcularlo (§8.4).
 
 ## 9. Lista final antes de anunciar la versión
 
 - [ ] `CHANGELOG.md` contiene `X.Y.Z` y la fecha correcta.
-- [ ] `pyproject.toml`, `tidalamp/__init__.py`, `tidalamp/about.py`, `PKGBUILD` y
-      `.SRCINFO` muestran la misma versión (§3.2). La suite lo comprueba para los tres
-      primeros; `.SRCINFO` no lo cubre nadie más que esta casilla.
+- [ ] `pyproject.toml`, `tidalamp/__init__.py`, `tidalamp/about.py` y el `?v=` del
+      `README.md` muestran la misma versión (§3.2). La suite lo comprueba para los tres
+      primeros; el `?v=` no lo cubre nadie más que esta casilla.
 - [ ] La pantalla de ayuda (`?`) muestra la versión y sus notas, y la fecha ya no dice
       «sin publicar».
-- [ ] Las pruebas, Ruff, mypy, build y `twine check` pasan.
-- [ ] El CI del commit de versión está en verde.
+- [ ] Las pruebas, Ruff, mypy, build y `twine check` pasan **en Windows**.
+- [ ] El CI del commit de versión está en verde, en las cuatro versiones de Python.
 - [ ] Existe el tag anotado `vX.Y.Z` y apunta al commit correcto.
 - [ ] El workflow `release` terminó con `build` y `publish` en verde.
 - [ ] PyPI muestra la versión y una instalación nueva funciona.
-- [ ] Existe un GitHub Release publicado sobre el mismo tag.
-- [ ] El `PKGBUILD` usa un checksum real, nunca `SKIP`.
-- [ ] `makepkg -Csi` y `namcap` fueron revisados.
-- [ ] El AUR muestra la versión y una instalación mediante `yay` funciona.
+- [ ] Existe un GitHub Release publicado sobre el mismo tag, con el instalador adjunto.
+- [ ] El instalador se instala y se desinstala limpio en una máquina sin Python (§8.2).
+- [ ] El `sha256` del manifiesto es el del fichero que sirve la URL pública, no el del
+      binario local (§8.4).
+- [ ] El pull request de `winget-pkgs` está fusionado y `winget install` funciona.
+
+Y una que no es de publicación pero decide si la versión merece anunciarse: **el TUI
+abierto a ojo en Windows Terminal y en conhost**, con una pista sonando. La suite mide
+celdas, no colores (`plan.md` §7 y §9).
 
 ## 10. Problemas frecuentes y recuperación
 
@@ -624,7 +640,9 @@ los archivos y publicar una versión nueva.
 
 Compara carácter por carácter owner, repositorio, nombre del workflow y environment.
 Los errores más comunes son escribir `.github/workflows/release.yml` donde PyPI pide
-sólo `release.yml`, o no usar `pypi` en ambos lados.
+sólo `release.yml`, y —el propio de este fork— **haber dejado el publisher apuntando a
+`tidalamp` en vez de a `tidalamp-win`**, que es lo que pasa si se copió la configuración
+de upstream sin releerla (§1.3).
 
 ### El job `publish` queda esperando
 
@@ -634,63 +652,60 @@ deployment. Revisa también que sus reglas permitan tags `v*`.
 ### PyPI dice que el archivo o la versión ya existe
 
 Una versión de PyPI es inmutable: no se puede sobrescribir. Incrementa la versión,
-actualiza changelog y paquete AUR, crea un commit y tag nuevos y repite el proceso.
+actualiza el changelog, crea un commit y tag nuevos y repite el proceso.
 
-### `updpkgsums` o `makepkg` no descargan el tarball
+### El CI falla sólo en el job `bare`
 
-Confirma que el tag sea público y que esta URL responda:
+Ese job corre un script de comprobación que en upstream iba como *heredoc* de bash. En
+un runner `windows-latest` la shell por defecto es PowerShell y el heredoc no existe.
+La solución está en `windows.md` §5.16: o `shell: bash` en ese paso, o —mejor— mover el
+script a un fichero `.py` y llamarlo.
 
-```text
-https://github.com/wh01s17/tidalamp/archive/refs/tags/vX.Y.Z.tar.gz
-```
+El job existe por un motivo que sigue vigente: comprueba la instalación **sin extras**,
+que es lo que teclea un usuario. Una dependencia dura sobre una opcional rompe la
+instalación documentada sin que ningún otro job se entere; así desaparecieron las
+carátulas en un clon limpio. No lo desactives para que el CI pase.
 
-Luego verifica que `pkgver` y la URL `source` del `PKGBUILD` formen exactamente ese
-tag.
+### El instalador construye pero la aplicación no abre
 
-### El push al AUR falla
+Casi siempre son los datos que PyInstaller no encuentra solo. Comprueba que el `.spec`
+declare como `datas` los `.tcss` de `tidalamp/styles/` y el `.ico`. Textual falla en el
+arranque sin su hoja de estilos, y el error que da no menciona el fichero que falta.
 
-Comprueba:
+### La validación de winget rechaza el pull request
 
-- que la clave pública esté en tu perfil del AUR;
-- que `ssh -T aur@aur.archlinux.org` te reconozca;
-- que el remoto sea `ssh://aur@aur.archlinux.org/tidalamp.git`;
-- que la rama sea `master`;
-- que el commit incluya juntos `PKGBUILD` y `.SRCINFO`.
+Los dos motivos habituales:
 
-### El registro de una cuenta nueva en el AUR no está disponible
-
-No es un fallo de tidalamp ni de la red local. El AUR cerró temporalmente el registro
-público como parte de su respuesta de seguridad y no admite solicitudes manuales de
-alta. Conserva preparado el paquete, sigue los anuncios de `aur-general` y retoma
-§1.4 y §8.4–§8.6 sólo cuando Arch comunique la reapertura. No automatices reintentos ni
-uses credenciales de otra persona.
+- **El hash no coincide.** Se reconstruyó el instalador después de calcularlo. Vuelve a
+  §8.4 con el fichero que realmente sirve la URL.
+- **No desinstala limpio.** La validación instala y desinstala en una máquina virgen.
+  Reprodúcelo tú primero (§8.2) antes de volver a enviar.
 
 ### Se descubre un fallo grave después de publicar
 
 No reemplaces el tag ni intentes sobrescribir PyPI. Corrige el fallo, incrementa la
 versión PATCH y publica una nueva versión. Si el paquete defectuoso no debe instalarse,
-márcalo como *yanked* en PyPI y explica la sustitución en GitHub y en el AUR.
+márcalo como *yanked* en PyPI y explica la sustitución en el GitHub Release y en el
+manifiesto de winget.
 
 ## 11. Publicaciones posteriores
 
 Para la segunda versión y las siguientes no se repite la configuración de PyPI ni el
-GitHub environment. Tampoco se repite la clave SSH del AUR una vez que sea posible
-crear la cuenta y completar esa configuración. El ciclo normal es:
+GitHub environment, ni el alta en `winget-pkgs`. El ciclo normal es:
 
 1. elegir una versión nueva;
-2. actualizar changelog, los cuatro sitios de la versión (§3.2: `pyproject.toml`,
-   `tidalamp/__init__.py`, `releases()` en `tidalamp/about.py`, y `pkgver` con
-   `pkgrel=1` en el `PKGBUILD`);
+2. actualizar el changelog y los cuatro sitios de la versión (§3.2: `pyproject.toml`,
+   `tidalamp/__init__.py`, `releases()` en `tidalamp/about.py`, y el `?v=` del README);
 3. validar y construir;
 4. confirmar el commit y esperar el CI;
 5. crear y subir el tag;
 6. verificar PyPI;
 7. crear el GitHub Release;
-8. recalcular el checksum, probar y actualizar el AUR.
+8. construir el instalador, adjuntarlo, recalcular el hash y actualizar winget con
+   `wingetcreate update`.
 
-Una corrección exclusiva del `PKGBUILD` no necesita versión nueva de PyPI ni nuevo
-GitHub Release: incrementa sólo `pkgrel`, regenera `.SRCINFO`, prueba y publica el
-commit en el AUR.
+Los pasos 1–7 se pueden hacer sin tocar Windows: el wheel es puro y el workflow corre en
+un runner Linux. **El paso 8 no**, y tampoco la comprobación final de §9.
 
 ## Referencias oficiales
 
@@ -699,6 +714,7 @@ commit en el AUR.
 - [PyPI: solución de problemas de Trusted Publishing](https://docs.pypi.org/trusted-publishers/troubleshooting/)
 - [GitHub: administrar Releases](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository)
 - [GitHub: administrar environments](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments)
-- [ArchWiki: pautas de publicación en el AUR](https://wiki.archlinux.org/title/AUR_submission_guidelines)
-- [AUR: cierre inicial por paquetes maliciosos](https://lists.archlinux.org/archives/list/aur-general%40lists.archlinux.org/message/4JRS73YVTE7JUYHHE3ZDUIHXYHXZ3YQQ/)
-- [AUR: estado del servicio y registro aún cerrado](https://lists.archlinux.org/archives/list/aur-general%40lists.archlinux.org/message/2IJD5MFHSLXARQTOP4FH64CJLW2BIIGC/)
+- [winget-pkgs: cómo contribuir un manifiesto](https://github.com/microsoft/winget-pkgs/blob/master/CONTRIBUTING.md)
+- [winget: esquema de los manifiestos](https://learn.microsoft.com/en-us/windows/package-manager/package/manifest)
+- [wingetcreate](https://github.com/microsoft/winget-create)
+- [PyInstaller: ficheros de datos en el .spec](https://pyinstaller.org/en/stable/spec-files.html)

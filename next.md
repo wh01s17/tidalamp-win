@@ -11,95 +11,147 @@ fichero que acumula entradas tachadas deja de decir qué falta, que es lo único
 que existe. Si algo se descarta, no se borra sin más: baja a «Descartado por ahora» con
 el motivo.
 
-Lo de aquí no bloquea publicar. `plan.md` §5 y §6 mandan sobre el estado general.
+**En este fork, la cola es la migración.** Mientras las fases F0–F7 de
+[`windows.md`](./windows.md) no estén cerradas no hay funcionalidad nueva que planear:
+lo que hay es un cliente de TIDAL para Linux que todavía no arranca en Windows. Este
+fichero no duplica esas fases —viven en `windows.md` §4, con su criterio de hecho— sino
+que recoge lo que **no cabe** allí: las decisiones abiertas, lo que hay que comprobar a
+mano y lo que se descartó por el camino.
 
 ---
 
 ## Para la próxima versión
 
-Descubrir, la vista de cuadrícula, la gestión de playlists propias y las páginas que
-llegan solas entraron en la `0.11.0` (publicada el 2026-09-15): ver
-`CHANGELOG.md` y `plan.md` §4. La `0.11.1` (publicada el 2026-09-16) sólo arregla
-el título de la ventana de letras, y la `0.11.2` (publicada el 2026-09-17) que el DAC
-siga el rate de cada pista y no sólo el de la primera. La `0.12.0` (publicada el
-2026-09-17) ofrece añadir tidalamp al menú de aplicaciones, y la `0.13.0` (publicada el
-2026-09-17) trae cerrar sesión desde `o`. Las escrituras en tus playlists
-se comprobaron contra TIDAL real ese mismo día. Queda por comprobar a mano:
+**Nada publicable todavía.** La versión `0.13.0` del `pyproject.toml` es la heredada de
+upstream y describe un árbol Linux. No se etiqueta ni se sube nada hasta cerrar F2
+(suite verde en Windows) como mínimo, y en la práctica hasta F4.
 
-- **Ver la disposición compacta en un terminal real.** Por debajo de 80x26 la
-  interfaz quita la carátula y la fila de balance, y hasta ahora solo lo cubren tests
-  que miden celdas y no colores (`plan.md` §9.5).
-  - *Lo que ya se ha visto (2026-09-14):* una captura a 72x17, que está por debajo del
-    mínimo de 60x18 por la altura. Sale bien el aviso («The window is 72×17. TIDAL AMP
-    needs at least 60×18.»), en el color de acento y sin cortes. **La disposición
-    compacta en sí no sale**, porque a esa altura la tapa el aviso.
-  - La forma tenue que se ve detrás del aviso en esa captura es el fondo de pantalla
-    del mantenedor, que se transparenta a través de kitty. No es un fallo.
-  - *Visto el 2026-09-14:* el aviso, bien de 48x11 a 72x17, sin cortes (a 48 columnas
-    la línea más larga cabe justa). Y la disposición compacta con el reproductor en
-    marcha, en un tema: el transporte cabe entero, la barra de título está completa,
-    no hay carátula ni fila de balance, y la cola recorta sus columnas. En la captura
-    la insignia decía «C  FLAC…»: era el `Glide` desplazando la línea, que no cabe, a
-    mitad de camino. No es un fallo.
-  - El cuadradito oscuro que se veía a la izquierda de la línea de estado, en esa
-    captura y también a tamaño normal, era el spinner `#busy` parado: su relleno
-    dibujaba dos celdas de su propio fondo. Arreglado (clase `-idle`, sin relleno).
-  - *Por mirar:* los otros tres temas.
-  - *Comprobación:* capturas entre 60x18 y 79x25 (por ejemplo 72x20 y 79x25) en los
-    cuatro temas. Qué mirar: lo mismo que §9.5, que la fila del transporte no se salga
-    ni se parta y que las barras de título llenen su fila.
+### Comprobaciones que solo se hacen a mano
+
+La suite no cubre ninguna de estas, y ninguna se puede automatizar desde aquí. Van
+contra la lista de `windows.md` §6, que es la versión larga; aquí queda lo que
+**necesita criterio humano**, no solo ejecutar un comando.
+
+- **El TUI en conhost.** Todo el desarrollo va a pasar en Windows Terminal, que es lo
+  razonable, y por eso mismo conhost se va a quedar sin mirar hasta que lo rompa un
+  usuario. Colores, redimensionado y velocidad de repintado se comportan distinto.
+  *Qué mirar:* las cuatro disposiciones (`quattro`, `nova`, `retro`, `ascii`), que la
+  fila del transporte no se salga ni se parta, y que la carátula en medios bloques no
+  quede una losa gris —ya mordió una vez en Linux, ver `plan.md` §7.
+
+- **La disposición compacta.** Heredada sin comprobar de upstream: por debajo de 80×26
+  la interfaz quita la carátula y la fila de balance, y solo la cubren tests que miden
+  celdas y no colores (`plan.md` §9.5). En Windows hay un motivo nuevo para mirarla: la
+  fuente por defecto de la consola no es la de kitty, y los anchos pueden no cuadrar.
+  *Comprobación:* capturas entre 60×18 y 79×25 en los cuatro temas.
+
+- **Un DAC USB real a 24/96 en modo exclusivo.** Es la comprobación que da sentido a F5
+  y la única que prueba que el proyecto sigue siendo lo que dice ser. En Linux se hizo
+  con un FiiO BTR15 mostrando `PCM 176.4K` en su pantalla; aquí hace falta el
+  equivalente. Sin un DAC que informe del rate recibido, F5 se queda en «el código
+  parece correcto», que no es lo mismo.
+
+- **Una pista hi-res de principio a fin, sin cortes.** El paso de una pista a otra usa
+  `--prefetch-playlist=yes` y la cola de mpv; el transporte nuevo de named pipe es
+  justo lo que se mete en medio de ese camino. Escuchar un álbum entero es la prueba,
+  no un test.
+
+### Decisiones abiertas
+
+Estas hay que tomarlas, no comprobarlas. Están aquí para que no se decidan por
+omisión.
+
+- **SMTC: hacerlo o no hacerlo.** `windows.md` §5.2 deja el servicio como un stub que
+  conserva la API de `MprisService`, y eso es suficiente para que la app funcione. Pero
+  la integración de escritorio es una funcionalidad real de upstream —teclas de
+  multimedia, Waybar, widgets externos— y aquí queda en nada. Implementarla exige una
+  ventana oculta con su propio bucle de mensajes para colgar SMTC de un `HWND`. Es
+  trabajo de verdad y es hostil a los tests. **Decidir antes de anunciar la primera
+  versión**, porque cambia lo que promete el README.
+
+- **Modo exclusivo por defecto: no.** Decidido en `windows.md` §5.5, y anotado aquí
+  para no volver a discutirlo: en WASAPI exclusivo ningún otro programa suena. Una app
+  de música que enmudece las notificaciones del sistema sin avisar genera un reporte de
+  bug que no es un bug. Va como ajuste, apagado, y el README explica qué gana quien lo
+  encienda.
+
+- **El nombre del comando.** La distribución es `tidalamp-win` pero el ejecutable
+  se sigue llamando `tidalamp` (`windows.md` §5.14). La alternativa —renombrarlo— pide
+  perseguir la cadena literal `tidalamp` por `cli.py`, `desktop.py`, `about.py` y el
+  catálogo entero de `i18n.py`. Nadie va a instalar los dos paquetes en la misma
+  máquina, así que la colisión es teórica. **Si alguien la encuentra de verdad, esto
+  se reabre.**
+
+- **Qué hacer con `packaging/aur/`.** `windows.md` §5.15 dice borrarlo. Está sin hacer
+  a propósito: mientras el port no arranque, el PKGBUILD es la única receta de
+  empaquetado que existe en el árbol y sirve de referencia de qué declara el proyecto
+  como dependencia. Se borra en F6, cuando haya algo que lo sustituya.
+
 ## Sin fecha
 
-- **«más…» en las categorías de Inicio.** Una categoría de la página de inicio trae
-  los diez primeros que TIDAL pone en la página, y la lista completa está detrás de
-  su «view all». `tidalapi` 0.8.11 lo tiene roto: `PageCategoryV2.view_all` llama a
-  un `session.view_all` que no existe. Habría que pedir la ruta de `_more.api_path`
-  a mano, como ya se hace con los enlaces de Explorar (`library._page_at`).
+Heredado de upstream, y sigue siendo válido aquí porque toca código que no cambia con
+el sistema operativo:
 
-- **Sacar objetos de verdad de `TidalAmp`.** 2635 líneas y 182 métodos en `app.py`;
-  `_setting_changed` es de lo más enredado. No en mixins (ver «Descartado»), sino
-  objetos con su propio diseño: reproducción, carátula, presentación de la cola y
-  aplicación de ajustes, dejando `TidalAmp` como raíz de composición. Es un rediseño
-  grande que no arregla ningún fallo, así que solo cuando haya tiempo para hacerlo
-  bien.
+- **«más…» en las categorías de Inicio.** Una categoría de la página de inicio trae los
+  diez primeros que TIDAL pone en la página, y la lista completa está detrás de su
+  «view all». `tidalapi` 0.8.11 lo tiene roto: `PageCategoryV2.view_all` llama a un
+  `session.view_all` que no existe. Habría que pedir la ruta de `_more.api_path` a
+  mano, como ya se hace con los enlaces de Explorar (`library._page_at`).
 
-- **Una guarda común para los workers al cerrar.** Un worker de hilo que termina
-  después de salir llama a `call_from_thread` contra un loop que se cierra: en la app
-  cuesta una excepción dentro de ese hilo, sin efecto visible, y en los tests es la
-  carrera por la que `app_helpers.isolate_runtime` desactiva el worker del sink.
-  Señalado por Codex (2026-09-12). Razonable y pequeño, pero sin un fallo que lo
-  pida: cuando aparezca uno.
-- La separación de `TidalAmp` (arriba) la señaló también Codex (2026-09-12), con la
-  misma conclusión: objetos con diseño propio. Vigilar además que `Mpv._request` (53
-  líneas, cada rama con su test) no crezca hasta ser otro núcleo.
+- **Sacar objetos de verdad de `TidalAmp`.** 3232 líneas en `app.py`; `_setting_changed`
+  es de lo más enredado. No en mixins (ver «Descartado»), sino objetos con su propio
+  diseño: reproducción, carátula, presentación de la cola y aplicación de ajustes,
+  dejando `TidalAmp` como raíz de composición. Es un rediseño grande que no arregla
+  ningún fallo. **Y aquí hay un motivo extra para no tocarlo:** `app.py` es el fichero
+  que la regla de oro de `windows.md` §1 manda dejar intacto para que los cambios de
+  upstream sigan aplicando. Reordenarlo cierra ese canal.
 
-- **Seleccionar varias pistas en la cola** para quitarlas o moverlas juntas; hoy se
-  hace de a una. Interesa, pero sin versión decidida.
+- **Una guarda común para los workers al cerrar.** Un worker de hilo que termina después
+  de salir llama a `call_from_thread` contra un loop que se cierra: en la app cuesta una
+  excepción dentro de ese hilo, sin efecto visible, y en los tests es la carrera por la
+  que `app_helpers.isolate_runtime` desactiva el worker del sink. Razonable y pequeño,
+  pero sin un fallo que lo pida. **Vigilar si reaparece en Windows**, donde el bucle por
+  defecto es Proactor y no Selector: es el tipo de carrera que cambia de forma al
+  cambiar de bucle.
+
+- **Seleccionar varias pistas en la cola** para quitarlas o moverlas juntas; hoy se hace
+  de a una. Interesa, pero sin versión decidida.
+
+- **Espectro FFT de verdad.** `windows.md` §5.6 deja el visualizador en el vúmetro RMS
+  porque cava no tiene build de Windows. La vía es captura loopback de WASAPI más FFT
+  con `numpy`, dentro del proceso, y **arreglaría de paso** la pega que cava tiene en
+  Linux: escucha el sink, así que muestra lo que suene en la máquina y no lo que suena
+  en mpv (`plan.md` §9.4). Es la única funcionalidad donde el port puede quedar por
+  encima del original.
 
 ## Descartado por ahora
 
 No se borran: quedan escritos con el motivo para no volver a discutirlos desde cero.
 
-- **Distribuir por pacman mientras el AUR siga cerrado** (2026-09-12). Los repos
-  oficiales no son una opción: los mantienen los Package Maintainers de Arch, y la vía
-  para entrar pasa por el AUR. Quedaban dos caminos, los dos viables porque todas las
-  dependencias están en `extra`: adjuntar el `.pkg.tar.zst` a cada GitHub Release
-  (`pacman -U`, sin actualizaciones) o un repositorio propio firmado con `repo-add`
-  (actualiza con `-Syu`, pero pide una clave de firma en los secretos de Actions y que
-  el usuario confíe en ella). El mantenedor prefirió quedarse en PyPI. Cuando reabra el
-  AUR, el PKGBUILD está listo.
-- **Radio de un artista o de una playlist** (2026-09-11), para completar el menú de la
-  `m`, que no tiene radio porque la de TIDAL nace de una pista. Al mantenedor no le
-  interesó: la radio de pista ya cubre lo que busca.
-- **Temporizador de apagado.** Un `set_timer` que llame a `action_stop` y un indicador
-  en el transporte. Barato, pero no lo pidió nadie todavía.
-- **Enrutar mpv a un sink propio de PipeWire** para que cava no oiga el resto del
-  sistema. Cuesta un nodo por ejecución para arreglar un caso raro. Ver `plan.md` §9.4.
-- **`app.py` en mixins por tema** (2026-09-11). Probado y revertido: mypy no acepta
-  `self: TidalAmp` en un mixin (el tipo de `self` tiene que ser supertipo de la clase),
-  así que las ~1100 líneas movidas quedan sin comprobar o piden un stub con las ~170
-  firmas duplicadas. Además los `@on` solo cuentan en clases que construye Textual, y
-  seis métodos tienen que quedarse porque los tests parchean nombres en
-  `tidalamp.app`. Si se retoma, que sea extrayendo objetos de verdad (MPRIS, carátula,
-  cola), con su propio diseño. El resto del reparto (`screens/`, `styles/`,
-  `widgets.py`, los tests de la app) está hecho y en `.git-blame-ignore-revs`.
+- **Una capa multiplataforma en vez de un fork** (2026-09-18). Era la alternativa obvia:
+  un `platform/` con implementaciones Linux y Windows detrás de una interfaz común, y un
+  solo repositorio. Se descartó porque duplica el coste de cada cambio futuro y porque
+  ninguno de los dos caminos queda bien probado —el CI de una máquina no ejerce las
+  ramas de la otra, y la que no se ejerce se pudre. La decisión del mantenedor fue un
+  proyecto en paralelo. Lo que sí se conserva de aquella idea es lo único que costaba
+  poco: **las firmas públicas no cambian** (`windows.md` §1), que es lo que mantiene los
+  diffs de upstream aplicables sin pagar por una abstracción.
+
+- **`pywin32` por adelantado** (2026-09-18). Resolvería de golpe los timeouts del named
+  pipe (E/S solapada), las ACL del fichero de sesión y la creación del acceso directo,
+  las tres cosas mejor que los apaños que propone `windows.md`. Pero es una dependencia
+  binaria pesada en un proyecto cuya decisión fundacional fue «cero dependencias
+  nativas» (`plan.md` §2, la fila del IPC). Se queda fuera **hasta que un problema
+  medido lo pida**; si entra, entra como extra opcional, no como dependencia dura.
+
+- **Empaquetar mpv dentro del instalador** (2026-09-18). Tentador: quita el único paso
+  manual de la instalación. Pero mpv es GPL y el proyecto también, así que redistribuir
+  su binario obliga a ofrecer su fuente correspondiente, y eso es una carga de
+  cumplimiento real para un mantenedor individual. Además contradice lo que dice la
+  descripción del paquete desde la primera versión («requires mpv»). `distro.py` da la
+  orden de instalación; con eso basta.
+
+- **Los descartes heredados de upstream siguen en pie** y no se reabren aquí: radio de
+  artista o de playlist, temporizador de apagado, `app.py` en mixins, y enrutar mpv a un
+  sink propio. Los motivos están en el `next.md` del repositorio original y ninguno
+  depende del sistema operativo.

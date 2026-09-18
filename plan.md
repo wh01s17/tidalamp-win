@@ -1,110 +1,55 @@
-# plan.md — estado del proyecto `tidalamp`
+# plan.md — estado del proyecto `tidalamp-win`
 
 Documento de traspaso. Describe qué existe, qué está verificado, qué falta y con qué
 criterio se tomaron las decisiones, para que cualquiera (humano o modelo) pueda
 retomar el trabajo sin contexto previo.
 
-**Última actualización:** 2026-09-17, versión `0.13.0` publicada en PyPI y en GitHub,
-con el tag `v0.13.0` sobre `6f6b25a` y el checksum del tarball en `d1de5e3`. Lo nuevo: la fila «Cerrar sesión» de la ventana `o`, que siempre
-borra la sesión y, con su casilla, también la configuración, la cola, el ecualizador,
-la caché y los lanzadores del menú; los versos más anchos que la ventana de letras se
-parten bajo su texto; y la interfaz en español deja en inglés los términos técnicos
-(rates, graph, resampling). Ver §4, «Cerrar sesión» y «Letras». Los tests de la app ya
-no esperan con pausas fijas (§7). Antes, 2026-09-17, versión `0.12.0` publicada en
-PyPI y en GitHub,
-con el tag `v0.12.0` sobre `9cb66d8` y el checksum del tarball en `991aa3a`. Lo nuevo: en el primer arranque con sesión y mpv, un diálogo ofrece
-añadir tidalamp al menú de aplicaciones (en Omarchy, como `omarchy-tui-install`); la
-ventana `o` tiene la fila «Acceso directo en el menú», que avisa con la ruta si ya
-existe; y el pie de esa ventana se desliza cuando no cabe. Ver §4, «Lanzador del menú».
-Antes, 2026-09-17, versión `0.11.2` publicada en PyPI y en GitHub,
-con el tag `v0.11.2` sobre `195fb2c` y el checksum del tarball en `649e6aa`, comprobada
-en el hardware (el BTR15 sigue el rate de cada pista). Es un arreglo: con los rates hi-res configurados, sólo la primera
-pista llegaba al DAC a su rate; PipeWire no cambia el de un dispositivo en marcha y
-mpv no lo deja parar entre pistas, así que las demás se remuestreaban (un AAC a
-44,1 kHz sonaba a 48 kHz). Ahora se fuerza `clock.force-rate` hasta que el DAC sigue a
-la pista, y `OUT` y la ventana `o` avisan si no coinciden. Antes, 2026-09-16, versión
-`0.11.1` publicada en PyPI y en GitHub,
-con el tag `v0.11.1` sobre `33a305a` y el checksum del tarball en `b40eafb`. Es un
-arreglo: el título de la ventana de letras (`y`) partía por
-palabras en un encabezado de una fila y el spinner quieto se quedaba 34 celdas, así que
-un nombre largo se cortaba y el modo y el proveedor no se veían; ahora usa todo el
-encabezado y se desliza cuando no cabe. Antes, 2026-09-15, versión `0.11.0` publicada
-en PyPI y en GitHub,
-con el tag `v0.11.0` sobre `975c12f` y el checksum del tarball en `340fb5d`. Lo nuevo: Descubrir, con la home de TIDAL, Para ti y Explorar,
-recorridos contra TIDAL real; la vista de cuadrícula de la biblioteca (`v`), con las
-carátulas en sextantes donde el terminal los dibuja solo; renombrar, describir,
-borrar y reordenar tus playlists, comprobado por el mantenedor contra TIDAL real; la
-página siguiente llega sola al acercarse al final, y el filtro de la biblioteca busca
-en todo el nivel. Y dos arreglos: la carátula del disco anterior volvía encima de la
-nueva al elegir otro desde el navegador, y el spinner parado dejaba un cuadradito
-oscuro delante de la línea de estado. Antes, 2026-09-14, versión `0.10.0` publicada
-en PyPI y en GitHub,
-con el tag `v0.10.0` sobre `f11ce4a`, el commit que arregla el `⌫` durante una carga
-(lo cazó CI después de preparar la versión). Lo nuevo, probado a mano por el mantenedor contra TIDAL
-real: un artista abre a sus secciones (populares, álbumes, EPs y sencillos, otros) y
-no sólo a sus pistas más escuchadas; «ir al artista» (`t`) e «ir al álbum» (`b`) en
-el menú de la pista, desde el navegador, la búsqueda y la cola, preguntando cuál
-cuando la pista tiene varios artistas; un guardado que falla se dice en la línea de
-estado y deja la marca «· sin guardar en disco»; una ruta de socket demasiado larga
-se dice al instante. Antes, 2026-09-12, versión `0.9.0` preparada, lo nuevo probado
-a mano por el mantenedor contra TIDAL real: mpv que
-no contesta ya no congela la pantalla (espera de 1 s una vez, sondeo y reinicio en
-workers, EOF leído como muerte), la pista siguiente preparada en mpv para que no haya
-corte, volumen normalizado con el ReplayGain de TIDAL y «Mis mixes» en la biblioteca.
-Antes, 2026-09-11, versión `0.8.1` preparada (timeouts reales para
-TIDAL, escrituras de playlists que no se duplican, el estado escrito de forma
-atómica y una resolución vieja descartada al pasar de pista o detener. En `0.8.0`: `s` ordena la
-biblioteca y el orden persiste, `d` quita de favoritos o de una playlist y `?` trae
-su ayuda; `m` abre el menú de un álbum, artista o playlist entero, y `a` sobre uno
-trae todas sus páginas; la ventana de la letra sigue a la pista que suena; `q` pregunta
-antes de salir; `w`, la pantalla completa con la cola al lado; reproducción automática; la
-velocidad también por MPRIS; `rounded`; la carátula más nítida en `blocks` y mucho más
-ligera en kitty y sixel; calidad, ritmos y reiniciar PipeWire, desde una lista. En
-`0.7.0`: el décimo tema temático, `bosque`; marcos más finos en los temáticos; la
-forma de la carátula como ajuste; la velocidad de reproducción; los nombres de los
-temas en el idioma en uso; el reloj en cuenta atrás, que no cabía. En `0.6.0`: nueve temas temáticos
-con su paleta, su frase y su imagen de fondo en la cola, dibujada como la carátula y
-mezclable con cualquier tema desde el ajuste `backdrop`; disposición `split` con la
-letra sobre la carátula; buscador en la ayuda; las líneas que no caben se deslizan;
-la cola repinta dos filas al mover el cursor, lo que en 4K bajó de 245 a menos de 5
-KiB por pulsación; antes, 2026-09-10: la carátula en `blocks` pasa a los glifos de
-cuadrante: cuatro muestras por celda en vez de una, el doble de resolución horizontal;
-el alto de la banda del display se recalcula en cada pasada y no sólo al redimensionar
-la carátula, que era por qué al cambiar de tema —o al arrancar en `nova`— la imagen se
-montaba sobre la barra de posición; `space` reproduce y `m` abre el menú de la pista
-sobre la cola; `u` deshace un vaciado; ocho presets de ecualizador; se puede añadir a
-una playlist que ya existe; las cuatro disposiciones cuadran bordes y anchos y las
-capturas del README se rehicieron; antes: `TooManyRequests` respeta `Retry-After` con un
-tope de un minuto; `g` devuelve el cursor a la pista que suena incluso si estaba
-filtrada; `p` guarda una instantánea de la cola como playlist de TIDAL por lotes y
-reporta creaciones parciales; posición, volumen y balance responden al clic; antes: el
-analizador con cuatro formas —`bars`,
-`mirror`, `curve` y `fine`, esta última un trazo continuo sobre la rejilla Braille— elegibles desde la ventana de ajustes, todas dibujadas donde ha estado
-siempre pero llegando al borde derecho, y **mucho más baratas en 4K**: 55% de un núcleo
-antes, 8% ahora, topando las bandas y mandando los tramos de un color de una vez;
-buscador en la cola con `ctrl+f`, en una barra
-bajo la lista como el filtro del navegador, con las filas conservando el número que
-tienen de verdad en la cola; `tidalamp -v` / `--version` imprime la versión
-en el terminal, que hasta ahora sólo estaba dentro de la TUI; la ayuda en dos pestañas —los atajos y «Acerca
-de»— con → y ← para pasar de una a otra, en vez de un documento único donde los
-créditos y las notas de versión quedaban tres pantallas por debajo de lo que se venía
-a mirar; antes: ventanas superpuestas proporcionales al terminal
-—inservibles en 4K a 84x26— sobre un velo translúcido que deja ver el reproductor, con
-el fondo congelado mientras hay un modal abierto para que eso cueste menos que antes;
-antes: filtro `/` dentro del navegador de la
-biblioteca, en una barra al pie que estrecha el nivel sin taparlo, y barra de ayuda del
-navegador que ya no se corta a mitad de palabra; antes: versión `0.1.0` cerrada y preparada para PyPI;
-Trusted Publishing configurado; publicación en el AUR aplazada sin fecha porque el
-registro público de cuentas nuevas continúa cerrado durante el endurecimiento de seguridad;
-cadena hi-res verificada en el hardware —el DAC
-marca `PCM 176.4K`—; pantalla de configuración con todo lo que antes pedía editar el
-TOML o exportar variables, incluidos los ritmos hi-res de PipeWire;
-menú de acciones al pulsar ↵ sobre una pista,
-con radio de TIDAL y «reproducir a continuación»; tope de volumen en 100 y slider que
-no se deforma; pantalla de ayuda con todos los atajos, créditos y notas de versión; los modales salieron de `app.py` a `screens.py`,
-la carátula sigue el tamaño del terminal, `markup=False` en los `Static` que reciben
-texto de TIDAL, aviso visible cuando falta Pillow y un job de CI que instala sin
-extras; antes: interfaz bilingüe español/inglés y README público en inglés)
+**Última actualización:** 2026-09-18. Fork de `wh01s17/tidalamp` v0.13.0 (commit
+`02ecbb3`) como proyecto paralelo para Windows, con el historial git reiniciado.
+Ni una línea migrada todavía.
+
+## 0. Leer esto antes que nada
+
+> [!IMPORTANT]
+> **Lo que describe este documento, de la §1 a la §9, es el proyecto Linux.** Es una
+> descripción exacta del código que hay en este árbol ahora mismo, porque el árbol es
+> una copia literal. No es una descripción de lo que hace este proyecto en Windows,
+> porque en Windows todavía no hace nada.
+
+Tres ficheros y para qué sirve cada uno:
+
+| Fichero | Qué contesta |
+|---|---|
+| [`windows.md`](./windows.md) | **Qué hay que hacer.** El plan de migración: qué ata el proyecto a Linux, en qué orden desatarlo, y cómo se comprueba cada paso. Mientras el port no esté cerrado, es el fichero más importante del repositorio |
+| `plan.md` (este) | **Por qué el código es como es.** El razonamiento detrás de cada decisión, heredado de upstream. Sigue valiendo: casi todo lo que explica es independiente del sistema operativo, y lo que no, `windows.md` lo recoge |
+| [`next.md`](./next.md) | **Qué queda por decidir.** Las decisiones abiertas, lo que hay que comprobar a mano y lo que se descartó, con el motivo |
+
+**Qué se conserva de este documento y por qué.** La tentación al forkear es vaciar el
+documento de traspaso y empezar limpio. Sería un error: la §4 son 1 800 líneas que
+explican *por qué* cada pieza está escrita como está —qué problema resolvía, qué se
+probó antes, qué se midió—, y ese razonamiento sobrevive al cambio de plataforma
+aunque la implementación no lo haga. El `--cache=yes` de `player.py` no está ahí por
+gusto de Linux; está porque alguien midió 1,02 s de buffer contra 6 Mbit/s. Borrarlo
+significaría volver a descubrirlo.
+
+**Qué hay que leer con reservas.** Estas secciones dicen cosas que **eran** ciertas en
+Linux y **no lo son** aquí:
+
+- **§2**, la tabla de decisiones de arquitectura. Una de sus filas —el IPC por socket
+  unix— es justo lo que cambia. Ver la nota al pie de esa tabla.
+- **§3**, el mapa de ficheros. Describe correctamente lo que hay, pero trece de esos
+  módulos cambian de tripas. `windows.md` §5 los recorre uno a uno.
+- **§5**, el estado de verificación. **Todo lo que marca «Verificado» se verificó en
+  Linux.** En Windows no hay nada verificado. Ver la nota al principio de la sección.
+- **§6** y **§9**, lo pendiente. Son la cola de upstream y están cerradas o son
+  irrelevantes aquí. La cola de este proyecto son las fases F0–F7 de `windows.md` §4.
+- **§8**, el entorno. Describe una máquina Arch con Hyprland.
+
+**El histórico de versiones de upstream no está aquí.** La cabecera original de este
+fichero acumulaba el resumen de cada versión publicada, de la `0.1.0` a la `0.13.0`.
+Eso vive donde le corresponde: en `CHANGELOG.md`, que se conserva íntegro, y en el
+repositorio original. Esta cabecera arranca de cero porque este proyecto arranca de
+cero.
 
 ---
 
@@ -113,13 +58,21 @@ extras; antes: interfaz bilingüe español/inglés y README público en inglés)
 Cliente de TIDAL para terminal con interfaz estilo Winamp 2.x (TUI). Reproduce audio
 con `mpv` y obtiene catálogo y streams con `tidalapi`.
 
-Antes se llamaba `tidal-cli-omarchy` porque se pensó como plugin de Omarchy. Se
-renombró a `tidalamp` al decidir que el producto es una TUI autónoma. El directorio ya
-está renombrado a `~/workspace/tidalamp`.
+**Este proyecto es el port a Windows de [`tidalamp`](https://github.com/wh01s17/tidalamp),
+que es una aplicación Linux.** La distribución se llama `tidalamp-win`; el módulo
+importable y el comando se siguen llamando `tidalamp`, y eso es deliberado
+(`windows.md` §5.14): es lo que mantiene aplicables los diffs de upstream.
 
-**Secuela del renombrado (ya resuelta):** el venv se había creado en la ruta antigua y
-los scripts de `.venv/bin` llevaban un shebang inexistente (`bad interpreter`). Se
-rehizo el 2026-09-08 con `python -m venv .venv && .venv/bin/python -m pip install -e ".[dev]" pyte`. Si vuelve a pasar tras mover el directorio, la cura es esa.
+Upstream, a su vez, se llamó `tidal-cli-omarchy` antes de la `0.1.0`, porque se pensó
+como plugin de Omarchy y se renombró al decidir que el producto es una TUI autónoma.
+Queda anotado porque explica los rastros de Omarchy que siguen en el código —
+`theme.py`, `desktop.py`— y que aquí se borran.
+
+**Una trampa del copiado, ya resuelta y que conviene no repetir:** la copia inicial
+arrastró el `.venv` del proyecto original, 196 MB cuyos shebangs apuntaban a
+`/home/.../tidalamp/.venv/bin/python`. Un venv no es reubicable. Se borró junto con
+las cachés de mypy, pytest y ruff. Si vuelve a pasar al mover el directorio, la cura
+es rehacerlo, no repararlo.
 
 ## 2. Decisiones de arquitectura (y por qué)
 
@@ -138,6 +91,27 @@ Estas son las decisiones que **no** hay que volver a litigar sin motivo nuevo:
 Alternativas descartadas y su motivo: `tidal-hifi` + MPRIS (mete un Electron de por
 medio), Puppeteer sobre `listen.tidal.com` (Widevine, frágil), Mopidy (demasiadas
 piezas).
+
+> [!NOTE]
+> **Lo que cambia en este fork, y lo que no.** Seis de las siete filas se mantienen sin
+> tocar: no usar la API oficial, el device flow, mpv como motor, Textual, la GPL y la
+> línea del DRM son decisiones sobre el problema, no sobre el sistema operativo.
+>
+> La que cambia es **el transporte del IPC**, y cambia sólo en su mitad. El socket unix
+> pasa a ser un named pipe (`\\.\pipe\tidalamp-mpv`), que es como mpv expone el mismo
+> protocolo JSON en Windows. Pero **el motivo de la decisión se conserva entero**: sigue
+> siendo IPC crudo en vez de `python-mpv`/libmpv, sigue sin haber dependencias nativas,
+> y sigue dando acceso directo a `time-pos`, `volume` y `af-metadata`. Cambia el tubo,
+> no la razón para usarlo.
+>
+> Ese «cero dependencias nativas» es además lo que mantiene a `pywin32` fuera del
+> proyecto, aunque resolvería tres problemas de golpe. Ver `next.md`, «Descartado por
+> ahora».
+>
+> Y se añade una decisión propia del fork, que tampoco hay que volver a litigar:
+> **fork duro, pero conservando las firmas públicas** (`windows.md` §1). Ni capa
+> multiplataforma ni `if sys.platform` repartidos; los cuerpos cambian, los contratos
+> no, y así los arreglos de upstream siguen aplicando con cherry-pick.
 
 ## 3. Mapa de ficheros
 
@@ -215,6 +189,32 @@ arrastraría TIDAL al único módulo que deliberadamente no lo conoce.
 
 `widgets.py`, `analyzer.py` y `scrolling.py` no conocen TIDAL ni mpv; recibe valores por reactives. Mantener esa
 separación: es lo que permitiría añadir otro frontend (ver §6).
+
+> [!NOTE]
+> **Qué módulos de este mapa cambian en el port.** Trece de los treinta y nueve; el
+> resto —unas 13 000 de las 17 100 líneas— es independiente del sistema operativo y no
+> hay que abrirlo. `windows.md` §5 los recorre uno a uno con lo que hay que hacer en
+> cada uno; aquí sólo la lista, para leer el mapa de arriba con ella al lado:
+>
+> | Módulo | Qué le pasa |
+> |---|---|
+> | `player.py` | socket unix → named pipe; transporte inyectable |
+> | `mpris.py` | D-Bus no existe: queda como stub con la API intacta |
+> | `config.py` | rutas XDG → `%APPDATA%` / `%LOCALAPPDATA%`; `IPC_SOCKET` → `IPC_PIPE` |
+> | `audio.py` | PipeWire/`pactl`/`/proc/asound` → WASAPI por mpv |
+> | `spectrum.py` | cava no tiene build de Windows: degrada al vúmetro RMS |
+> | `distro.py` | `/etc/os-release` → winget / scoop / choco |
+> | `desktop.py` | `.desktop` de freedesktop → acceso directo `.lnk` |
+> | `auth.py` | `chmod 0600` es un no-op: ACL explícita |
+> | `artwork.py` | detección de protocolo por `$WT_SESSION` y compañía |
+> | `theme.py` | dos funciones de Omarchy fuera; las paletas se quedan |
+> | `stream.py` | un fd filtrado que en Windows sí duele |
+> | `i18n.py` | `locale.LC_MESSAGES` no existe en Windows |
+> | `cli.py` | codificación de la consola antes de que arranque Textual |
+>
+> **`app.py` no está en la lista, y es a propósito.** Sus 3 232 líneas son el mayor
+> punto de contacto con upstream, y la regla de oro las deja intactas: si `mpris.py`
+> conserva su API, `app.py` no necesita ni un cambio.
 
 ## 4. Implementado
 
@@ -2014,6 +2014,26 @@ cosas, con su test cada una:
 
 ## 5. Estado de verificación
 
+> [!WARNING]
+> **Toda esta sección se verificó en Linux.** Cada «Verificado» de la tabla es cierto
+> sobre una máquina Arch con PipeWire, D-Bus y kitty, y **ninguno de ellos dice nada
+> sobre Windows**, donde no hay nada verificado todavía.
+>
+> Vale la pena leerla igual, y por dos motivos. El primero es que dice **cómo** se
+> comprobó cada cosa, y ese método se reutiliza tal cual: el tono de 440 Hz con ffmpeg
+> para el RMS, `pyte` sobre un pty para el render, el catálogo por AST para la i18n.
+> El segundo es que separa lo que se probó contra TIDAL real de lo que solo se probó
+> con dobles, y esa distinción no cambia al cambiar de plataforma: el camino que va de
+> `tidalapi` al manifiesto es el mismo código aquí.
+>
+> Lo que **no** se puede dar por bueno es la mitad de abajo de cada fila, la que toca
+> el sistema: mpv, MPRIS, la pila de audio, la carátula y el lanzador se vuelven a
+> verificar desde cero. La lista de comprobación de este proyecto es `windows.md` §6.
+>
+> Y hay una trampa concreta que esta tabla esconde: **dos tests de la suite pasan sin
+> comprobar nada en Windows**, los que usan `chmod(0o500)` para simular un directorio
+> no escribible. Un verde no es una verificación (`windows.md` §5.13).
+
 Distinguir esto importa: parte del código nunca se ha ejecutado contra TIDAL real.
 
 | Área                               | Estado                            | Cómo se comprobó                                                                                                                                                                |
@@ -2102,41 +2122,47 @@ una pista en cada calidad y leer `~/.local/state/tidalamp/tidalamp.log`.
 
 ## 6. Pendiente
 
-> [!NOTE]
-> La funcionalidad comprometida para la próxima versión vive en
-> [next.md](./next.md), con sus trampas y su forma de comprobarse. Descubrir, la
-> cuadrícula, la gestión de playlists y las páginas que llegan solas entraron en la
-> `0.11.0`, publicada el 2026-09-15; la `0.11.1` (2026-09-16) sólo arregla el título
-> de la ventana de letras, y la `0.11.2` (2026-09-17) que el DAC siga el rate de cada
-> pista; la `0.12.0` (2026-09-17) trae el lanzador del menú, y la `0.13.0`
-> (2026-09-17) cerrar sesión; allí quedan las comprobaciones a mano. Esta sección sigue siendo el estado general
-> y aquella, la cola de trabajo.
+> [!IMPORTANT]
+> **Lo pendiente de este proyecto es la migración entera.** La cola son las fases
+> F0–F7 de [`windows.md`](./windows.md) §4, cada una con su criterio de hecho. Las
+> decisiones abiertas y lo que hay que comprobar a mano están en
+> [`next.md`](./next.md). Esta sección conserva el estado general **de upstream**,
+> que es lo que explica qué hay construido y por qué ya no hace falta volver a
+> discutirlo.
 
-P1–P4 están cerradas: lo que queda no es funcionalidad que falte para que el
-reproductor sirva, sino acabado, distribución y confirmar contra TIDAL real cosas hoy
-probadas sólo con dobles.
+Ninguna fase está cerrada:
 
-**Orden propuesto (2026-09-11):** ~~P5 empaquetado~~ y ~~carátula~~ ✅ hechos. Cada
-versión se publica siguiendo `publish.md`; la última publicada es la `0.13.0`
-(2026-09-17), en PyPI y en GitHub, con el checksum del tarball ya en el PKGBUILD
-(`d1de5e3`). Lo que queda abierto aquí pide
-credenciales tuyas o un par de ojos.
+| Fase | Qué entrega | Criterio de hecho |
+|---|---|---|
+| **F0** | Metadatos y limpieza | `pip install -e .` funciona en Windows |
+| **F1** | Rutas + IPC + MPRIS neutralizado | `tidalamp tui` abre y reproduce una pista |
+| **F2** | Suite adaptada | `pytest -q` verde en Windows |
+| **F3** | Carátulas y terminal | Portada visible en Windows Terminal |
+| **F4** | Paquetes, lanzador, permisos | Acceso directo en el menú Inicio |
+| **F5** | Audio hi-res (WASAPI) | 24/96 confirmado bit-perfect |
+| **F6** | CI y empaquetado | Workflow verde; instalador generado |
+| **F7** | Documentación | README/plan/CHANGELOG coherentes |
 
-1. Publicar en el AUR cuando vuelva a abrir el registro de cuentas nuevas. El paquete
-   está preparado y se puede probar localmente, pero el alta final depende del
-   servicio externo y no tiene fecha anunciada. **Todo lo del AUR queda pendiente**
-   (decidido por el mantenedor el 2026-09-14): de la `0.13.0` sólo está hecho el
-   checksum (`publish.md` §8.1 y §8.3, en `d1de5e3`); §8.2 (`makepkg -Csi`,
-   `namcap`) no se ha ejecutado para esta versión, y §8.4 a §8.6 esperan al registro.
-2. ~~Mirar `retro` y `ascii` en un terminal de verdad~~ ✅ hecho el 2026-09-10; ver §9.5.
-   Queda el extremo pequeño: la disposición compacta no se ha visto nunca.
-3. ~~Una letra real de TIDAL~~ ✅ probada por el mantenedor el 2026-09-11; era lo
-   último de §5 que sólo se había probado con dobles.
-4. §9.4, que es una decisión y no una prueba.
+**El orden importa.** F1 desbloquea el arranque y F2 la suite; sin suite verde, todo
+lo que venga después se hace a ciegas. La tentación de empezar por F5 —el audio, que
+es lo interesante— es exactamente la forma de perder una tarde depurando contra una
+app que no abre.
 
-**Aviso para quien retome esto:** hay sesión guardada y funciona (§5). Lo que no se
-puede automatizar desde aquí sigue siendo rehacerla: `tidalamp login` es interactivo
-por definición (device flow).
+**Lo que pide un par de ojos y no se puede automatizar desde aquí:** el TUI en
+conhost, la disposición compacta, un DAC USB real a 24/96 en modo exclusivo, y un
+álbum entero sin cortes. Están en `next.md` con qué mirar en cada uno. Y hay una
+constante heredada que sigue valiendo: `tidalamp login` es interactivo por definición
+(device flow), así que cualquier comprobación «contra TIDAL real» empieza por ahí.
+
+### Lo cerrado en upstream
+
+P1–P5 están cerradas y **no se reabren**: describen funcionalidad que ya existe en el
+código de este árbol. Se conservan porque dicen con qué criterio se construyó cada
+pieza, que es lo que hay que respetar al reescribir sus tripas.
+
+La única entrada que muere con el fork es la del AUR, que estaba bloqueada
+externamente —el registro de cuentas nuevas de Arch seguía cerrado— y que aquí no
+aplica: los canales son PyPI y winget (`packaging/README.md`).
 
 ### ~~P1 — Exponer MPRIS en D-Bus~~ ✅ HECHO
 
@@ -2238,7 +2264,20 @@ dejará de importar y con él no arranca la aplicación entera.
 
 ## 7. Trampas conocidas
 
-Cosas que ya costaron tiempo una vez:
+Cosas que ya costaron tiempo una vez.
+
+> [!NOTE]
+> **Esta lista se conserva entera y sigue vigente.** Casi todas son trampas del
+> diseño del código o de Textual, no del sistema operativo: los ticks que no se
+> esperan con pausas fijas, el `retro` que pasaba sus tests y en pantalla era una losa
+> gris, la distinción entre timeout y socket muerto. Nada de eso cambia al cambiar de
+> plataforma.
+>
+> **Las trampas propias de Windows están en `windows.md` §7**, y son otras diez.
+> Merece la pena leer las dos listas antes de empezar: la de allí incluye que
+> `os.replace()` falla si el destino está abierto, que `chmod` es una ilusión, y que
+> `locale.LC_MESSAGES` no existe y su ausencia no da error sino una interfaz en el
+> idioma equivocado.
 
 - **Nada de `pilot.pause(0.3)` para esperar a un tick.** Los ticks de la app corren
   cada 0,1 s y 0,25 s y un runner cargado se los salta. Se espera a la condición con
@@ -2417,144 +2456,95 @@ Cosas que ya costaron tiempo una vez:
 
 ## 8. Entorno
 
-**El proyecto se está trabajando desde más de una máquina.** Lo que sigue describe la
-segunda (2026-09-08, host `omarchy`), no la que se documentó al principio: no des por
-instalado nada sin comprobarlo.
+**El entorno de desarrollo cambia con el fork y todavía no está montado.** Lo que
+sigue es lo que hace falta, no lo que hay.
 
-- Arch Linux, Hyprland (Omarchy), Wayland. Python 3.14. `mpv`, `ffmpeg`, `kitty`,
-  `dbus-daemon` y `pw-cli` presentes.
-- **Ausentes aquí:** `cava` (el espectro cae al vúmetro RMS, por diseño) y `playerctl`
-  (sólo hace falta para probar MPRIS a mano; la suite levanta su propio bus).
-- El sink por defecto es **Bluetooth**. Importa para el espectro: cava lee el monitor
-  del sink, y por Bluetooth la latencia es alta, así que las barras irán algo por detrás
-  del sonido. No es un fallo del analizador.
-- Venv en `.venv/`, rehecho tras el renombrado; `.venv/bin/tidalamp` funciona de nuevo.
-  Lleva el paquete en editable más `pytest` y `pyte`.
-- Tests: `.venv/bin/python -m pytest` (375 pruebas, ~60 s, sin red ni bus de usuario).
-  El extra `dev` arrastra Pillow, así que las pruebas de carátula corren de verdad; si
-  falta, se saltan solas.
-- En la primera máquina `cava` sí estaba, en `/usr/bin/cava`, y arrancó con la
-  configuración real de 19 bandas. Las pruebas automatizadas usan `tests/fake_cava.py`
-  y no lo necesitan en ninguna de las dos.
-- Para ver el layout sin terminal interactivo hay un atajo más corto que pyte:
-  `app.export_screenshot()` dentro de `run_test()` da un SVG del que se saca el texto.
-- Smoke headless de la app entera (mpv falso + sesión doble) en el scratchpad de la
-  sesión: ejerce paginación, reordenado y muerte/reinicio de mpv sobre la app real.
-- MPRIS tiene una integración reproducible en `tests/test_mpris.py`: levanta un bus de
-  sesión temporal, conecta dos servicios y un cliente, y lo destruye al terminar.
-- Para verificar la TUI sin terminal interactivo: correr la app bajo `pty.fork()` y
-  emular la pantalla con `pyte`. Es como se generaron las capturas de este repo.
+### Lo que hay que tener
 
+- **Windows 10 21H2 o superior.** Windows 11 es el objetivo.
+- **Windows Terminal**, no el host de consola heredado. El desarrollo va a pasar aquí,
+  y por eso mismo conhost se va a quedar sin mirar: está anotado en `next.md` como
+  comprobación manual pendiente, porque si no se mira a propósito no se mira nunca.
+- **Python 3.11–3.14.** El `requires-python` es `>=3.11` y el CI cubre las cuatro.
+- **mpv**, por `winget`, `scoop`, `choco` o a mano. Hace falta `mpv.exe`; el `mpv.com`
+  es el envoltorio de consola y abre una ventana negra encima del TUI.
+- Venv en `.venv\`, con el paquete en editable más el extra `dev`:
+  `.venv\Scripts\pip install -e ".[dev]"`.
+
+### Lo que no hay y no va a haber
+
+- **`cava`.** No tiene build de Windows. El espectro cae al vúmetro RMS, por diseño, y
+  eso no es un fallo del entorno (`windows.md` §5.6).
+- **`dbus-daemon`.** No existe en Windows y no hace falta: el test de integración de
+  MPRIS que levantaba un bus temporal no aplica aquí.
+- **`playerctl`, `pactl`, `pw-cli`.** Herramientas de la pila Linux. Sus equivalentes
+  no son programas sino APIs: WASAPI por mpv para el audio, SMTC para el control de
+  multimedia.
+- **kitty y el protocolo de gráficos.** Sólo WezTerm lo habla en Windows. La carátula
+  va en medios bloques salvo que se configure otra cosa.
+
+### Trampas del entorno, no del código
+
+- **Rutas largas.** Windows corta en 260 caracteres y los directorios temporales de
+  pytest más los `.m3u8` generados se acercan. Si salen `FileNotFoundError` sin
+  sentido, habilitar `LongPathsEnabled` en el registro.
+- **La página de códigos de la consola.** Los mensajes que se imprimen antes de que
+  Textual tome la pantalla llevan `«»`, `ñ` y `—`. En una consola con página de
+  códigos heredada salen como basura. `PYTHONUTF8=1` lo arregla globalmente.
+- **`mypy` necesita `platform = "win32"`.** Sin eso, una comprobación en una máquina
+  Linux o en un runner Linux valida las ramas que aquí no existen y se salta las que
+  sí (`windows.md` §5.14).
+
+### Lo que se conserva del método de upstream
+
+Esto sí sobrevive al cambio de plataforma, y ahorra reinventarlo:
+
+- **Verificar la TUI sin terminal interactivo**: correr la app bajo un pty y emular la
+  pantalla con `pyte`. Es como se generaron las capturas del repositorio original.
+  *Ojo:* `pty.fork()` es POSIX. En Windows hay que ir por ConPTY o, más barato, por el
+  atajo que upstream también usaba: `app.export_screenshot()` dentro de `run_test()`
+  devuelve un SVG del que se saca el texto, y eso funciona en cualquier sitio.
+- **El tono de 440 Hz con ffmpeg** para comprobar la medición RMS: devuelve −21 dBFS
+  estable y es un valor contra el que contrastar.
+- **Los dobles de la suite.** `tests/fake_mpv.py` habla el IPC de verdad, incluidos los
+  eventos asíncronos intercalados con las respuestas, y tiene tres variables de entorno
+  para portarse mal a propósito. Es lo que prueba la recuperación de un mpv colgado y
+  hay que conservarlo al portarlo (`windows.md` §5.13).
+- **La suite no toca la red, ni TIDAL, ni ningún servicio del sistema.** Esa propiedad
+  se mantiene: si un test nuevo la rompe, el test está mal.
 
 ## 9. Qué queda para el usuario
 
-**Las tres comprobaciones de esta sección están hechas** (2026-09-08). El usuario
-instaló cava, reprodujo Michael Jackson – Thriller en hi-res y mandó una captura:
-carátula dibujada con el protocolo de kitty, insignias `24bit 176kHz HI_RES_LOSSLESS`,
-analizador en `FFT` con espectro real, barra de estado visible con
-«reproduciendo Michael Jackson – Thriller». Se conserva el procedimiento por si hay que
-repetirlo tras un cambio.
+**En upstream esta sección estaba cerrada.** Las comprobaciones que sólo podía hacer
+el mantenedor con su propio hardware se hicieron el 2026-09-08: cava instalado y el
+espectro real dibujándose, la carátula con el protocolo de kitty, las insignias
+`24bit 176kHz HI_RES_LOSSLESS`, y —la que de verdad importaba— la pantalla de un FiiO
+BTR15 marcando `PCM 176.4K`, que es la prueba de que el hi-res llegaba **al DAC** sin
+remuestrear.
 
-Más tarde, la misma pista sirvió para la comprobación que faltaba y que ninguna de
-estas tres cubría: que el hi-res llegue **al DAC** sin remuestrear. La pantalla del
-FiiO BTR15 marcando `PCM 176.4K` es la prueba; está en la tabla de §5.
+**Aquí vuelve a estar abierta entera**, porque ninguna de ellas dice nada sobre
+Windows. La lista de este proyecto es [`windows.md`](./windows.md) §6, y las que piden
+criterio humano en vez de ejecutar un comando están en [`next.md`](./next.md).
 
-Queda §9.5, que sí es una comprobación, y §9.4, que es una decisión y no una prueba.
-La versión `0.1.0` ya está cerrada y PyPI tiene listo Trusted Publishing; quedan subir
-el commit, comprobar el CI y crear el tag que inicia la publicación. El alta y la
-subida al AUR quedan aparte y sin fecha hasta que Arch reabra el registro público de
-cuentas nuevas.
+De aquella sección sobreviven dos cosas, y las dos son el listón, no el resultado:
 
-### 9.1 Espectro real de cava — HECHO
+1. **La prueba del hi-res es el DAC, no la insignia.** El reproductor puede mostrar
+   `24bit 96kHz` con toda honestidad mientras el sistema remuestrea por debajo; eso es
+   exactamente lo que pasaba en Linux antes de configurar PipeWire, y es lo que pasa en
+   Windows en modo compartido. La comprobación que vale es un aparato que informe del
+   rate que está recibiendo. Sin uno, F5 se queda en «el código parece correcto».
 
-En esta máquina `cava` no está instalado (en la otra sí lo estaba; ver §8):
+2. **Una prueba mide celdas, no colores.** Las cuatro disposiciones estaban cubiertas
+   por tests de Textual y aun así el `retro` de medios bloques pasaba los suyos y en
+   pantalla era una losa gris de lado a lado (§7). Por eso mirar las disposiciones a
+   ojo sigue en la lista de comprobaciones manuales, y por eso el extremo pequeño —la
+   disposición compacta, por debajo de 80×26— sigue sin verse nunca, ni en Linux ni
+   aquí.
 
-```sh
-sudo pacman -S cava
-cd ~/Documents/workspace/tidalamp && .venv/bin/tidalamp tui
-```
-
-Con un sink Bluetooth como el de aquí, cuenta con que las barras vayan un poco por
-detrás del sonido: la latencia es del camino de audio, no del analizador.
-
-Reproduce algo y mira la insignia del display, a la derecha del `HI_RES_LOSSLESS`:
-
-- Dice **`FFT`** → cava arrancó y el analizador pinta su espectro. Las bandas graves y
-  agudas se mueven por separado.
-- Dice **`RMS`** → cava no arrancó y estás viendo el vúmetro repartido en bandas: todas
-  suben y bajan a la vez. Si pasa esto, `pgrep -a cava` dice si el proceso vive, y
-  `TIDALAMP_DEBUG=1 .venv/bin/tidalamp tui` deja el motivo en
-  `~/.local/state/tidalamp/tidalamp.log`.
-
-Qué anotar: si con música sonando las bandas responden a la música de verdad. Es lo
-único que valida que cava está capturando el sink y no leyendo silencio.
-
-### 9.2 Carátula en kitty — HECHO
-
-En la misma sesión, la portada va a la izquierda del reloj, en un recuadro que crece
-con el terminal (18×9 a 40×20). Tu
-terminal es kitty, así que se dibuja con su protocolo gráfico: píxeles de verdad.
-
-```sh
-.venv/bin/tidalamp tui                      # kitty, píxeles
-TIDALAMP_ART=blocks .venv/bin/tidalamp tui  # medios bloques, para comparar
-```
-
-Qué mirar:
-
-1. Que la imagen caiga dentro del recuadro y no se monte sobre el reloj ni el marquee.
-2. Que **desaparezca** al abrir `l`, `y` o `e`, y **vuelva** al cerrar la ventana. Es
-   deliberado: una imagen de kitty se pinta por encima del texto y si no, el modal se
-   abriría por debajo.
-3. Que al cambiar de pista se sustituya, sin acumular imágenes ni dejar restos al salir.
-
-Si no aparece nada, la barra de estado lo dice: falta Pillow, `.venv/bin/pip install -e ".[art]"`.
-
-### 9.3 Salida de audio real — HECHO
-
-Todo lo verificado por vía automatizada es con `ao=null`: mpv decodifica de verdad (RMS
-−19,2 dBFS sobre una pista hi-res) pero no sale sonido por PipeWire en ninguna sesión
-de pruebas. Para repetirlo a mano: reproducir una pista hi-res y una normal, comprobar
-que se oyen y que las insignias dicen `24bit … HI_RES_LOSSLESS` en la primera.
-
-**Y mirar el DAC, no sólo la insignia.** Las dos cosas pueden discrepar: si PipeWire
-tiene el grafo fijo en un ritmo, la insignia dice la verdad sobre el stream mientras el
-DAC recibe 48 kHz. La pantalla de `o` lo detecta y lo arregla; un DAC con pantalla lo
-confirma, y si no la tiene, `grep Momentary /proc/asound/card*/stream0` mientras suena.
-Mirarlo en la **segunda** pista, y que sea de otro rate que la primera: la primera tras
-reiniciar PipeWire siempre llega bien, y lo que se comprueba es que el DAC la siga. Si
-no la sigue, `OUT` dice «resampling desde … kHz».
-
-### 9.4 Decisión pendiente, no comprobación
-
-cava escucha el **sink**, no nuestro mpv: si suena otra cosa a la vez, se cuela en el
-analizador. Se arreglaría enrutando mpv a un sink propio de PipeWire, a cambio de un
-nodo por ejecución. Sigue sin parecer que compense; la decisión es tuya.
-
-### 9.5 Mirar `retro` y `ascii` — HECHO
-
-**Las cuatro vistas a la vista el 2026-09-10**, en capturas del terminal real del
-usuario a su tamaño habitual. La fila del transporte no se sale ni se parte en ninguna,
-las barras de título llenan su fila sin cortar el nombre, y la carátula queda dentro de
-su recuadro. La revisión encontró defectos reales y se arreglaron en la 0.4.0: la fila
-del título de la cola se quedaba corta por un número escrito a mano distinto en cada
-disposición, `nova` empezaba en la fila cero contra el borde del terminal, y en
-`quattro` el nombre de la app caía justo encima de la carátula.
-
-Lo que sigue sin verse es el extremo pequeño: las capturas son de un terminal ancho, y
-la disposición compacta —por debajo de 80x26— sólo está cubierta por pruebas, que miden
-celdas y no colores.
-
-Las cuatro estructuras están cubiertas por pruebas Textual, pero una prueba mide
-celdas, no colores. Ya mordió una vez: el `retro` de medios bloques pasaba sus
-pruebas y en pantalla era una losa gris de lado a lado (§7).
-
-```sh
-TIDALAMP_THEME=retro .venv/bin/tidalamp tui
-TIDALAMP_THEME=ascii .venv/bin/tidalamp tui
-```
-
-Qué mirar en cada una: que la fila del transporte no se salga ni se parta, que las
-barras de título llenen su fila sin cortar el nombre, y que la carátula quede dentro
-de su recuadro y no encima de la barra de posición. Con `o` se cambia entre las cuatro
-sin reiniciar, que es la forma rápida de compararlas.
+Y una decisión que upstream dejó abierta y que este fork **hereda con otra forma**: en
+Linux, cava escucha el sink y no a mpv, así que el analizador muestra lo que suene en
+la máquina. Se arreglaría enrutando mpv a un sink propio, a cambio de un nodo de
+PipeWire por ejecución, y no parecía compensar. En Windows la pregunta se replantea
+sola: si algún día se implementa el espectro por captura loopback de WASAPI, se puede
+filtrar por sesión de audio y el problema no llega a existir. Está en `next.md`, «Sin
+fecha».

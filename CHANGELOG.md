@@ -3,7 +3,38 @@
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 versioning is [semantic](https://semver.org/).
 
+> [!NOTE]
+> **Everything from 0.13.0 down belongs to [tidalamp](https://github.com/wh01s17/tidalamp),
+> the Linux project this one forks from, and describes behaviour verified on Linux.**
+> It is kept rather than truncated because it is the record of why the code is the way
+> it is — most entries name the problem the change solved, and that reasoning survives
+> the change of platform even where the implementation does not. The Windows port has
+> not shipped a version yet.
+
 ## [Unreleased]
+
+### Added
+
+- `windows.md`: the migration plan. What ties the project to Linux, in what order to
+  untie it, and how each step is checked, written so it can be executed without having
+  seen the upstream repository.
+
+### Changed
+
+- Forked from tidalamp 0.13.0 (`02ecbb3`) as a parallel Windows project, with the git
+  history restarted: the Linux project's commits stay in its own repository.
+- The maintainer documentation now describes this fork: `plan.md` opens with what is
+  inherited and what is not yet true here, `next.md` carries the open decisions and the
+  checks that need a human, `publish.md` and `packaging/README.md` target PyPI and
+  winget instead of PyPI and the AUR, and `CONTRIBUTING.md` sets up a Windows
+  development environment.
+
+### Nothing else
+
+- **No code has been migrated.** The tree is still Linux: mpv over a Unix socket, MPRIS
+  over D-Bus, XDG paths, PipeWire for the audio stack, cava for the spectrum,
+  `/etc/os-release` for package commands and `.desktop` files for the launcher. It does
+  not run on Windows. The phase list is `windows.md` §4.
 
 ## [0.13.0] - 2026-09-17
 

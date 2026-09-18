@@ -1,20 +1,37 @@
-# tidalamp
+# tidalamp-win
 
-A terminal TIDAL client for Linux with a retro player interface. No official API app
+A terminal TIDAL client for Windows with a retro player interface. No official API app
 registration and no browser in the middle: device flow + mpv.
 
-![The same tidalamp layout cycling through six palettes](https://raw.githubusercontent.com/wh01s17/tidalamp/main/img/tidalamp-banner.svg?v=0.13.0)
+![The same tidalamp layout cycling through six palettes](https://raw.githubusercontent.com/wh01s17/tidalamp-win/main/img/tidalamp-banner.svg?v=0.13.0)
+
+> [!WARNING]
+> **This does not run on Windows yet.** tidalamp-win is a port in progress of
+> [tidalamp](https://github.com/wh01s17/tidalamp), which is a Linux application. The
+> code in this repository is still the Linux code: mpv is driven over a Unix socket,
+> desktop integration is D-Bus, and the audio stack talks to PipeWire. Nothing has been
+> migrated, there is nothing published on PyPI or winget, and the installation
+> instructions below describe the **intended** result, not something you can run today.
+>
+> The migration plan is [`windows.md`](windows.md). Everything else in this README
+> describes the player as it behaves on Linux, which is what the port is aiming to
+> reproduce.
+>
+> **If you are on Linux, you want [the original](https://github.com/wh01s17/tidalamp)**,
+> which is finished and published.
 
 ## Quick start
 
-```sh
-sudo apt install mpv    # dnf, zypper or pacman elsewhere — see Requirements
-pipx install "tidalamp[art]"
+*Once the port lands. See the warning above.*
+
+```powershell
+winget install mpv            # verify the id with: winget search mpv
+pipx install "tidalamp-win[art]"
 tidalamp
 ```
 
 Authorize once through the link it prints, and the session is kept at
-`~/.config/tidalamp/session.json`. Then: `/` searches, `l` opens your library, and
+`%APPDATA%\tidalamp\session.json`. Then: `/` searches, `l` opens your library, and
 `z` `x` `c` `v` are previous, play/pause, stop and next.
 
 ## Contents
@@ -34,8 +51,8 @@ Authorize once through the link it prints, and the session is kept at
 - [Equalizer and balance](#equalizer-and-balance)
 - [About the analyzer](#about-the-analyzer)
 - [Cover art](#cover-art)
-- [Desktop integration (MPRIS)](#desktop-integration-mpris)
-  - [In the application menu](#in-the-application-menu)
+- [Desktop integration](#desktop-integration)
+  - [In the Start menu](#in-the-start-menu)
 - [Help and about](#help-and-about)
 - [Troubleshooting](#troubleshooting)
 - [Platform support](#platform-support)
@@ -45,62 +62,78 @@ Authorize once through the link it prints, and the session is kept at
 ## Installation
 
 > [!IMPORTANT]
-> **Availability:** PyPI is the active installation channel. The AUR
-> package is ready, but its publication is delayed because
-> [registration of new AUR accounts remains closed](https://lists.archlinux.org/archives/list/aur-general%40lists.archlinux.org/message/2IJD5MFHSLXARQTOP4FH64CJLW2BIIGC/)
-> during the service's security hardening. No reopening date has been announced.
+> **Nothing is published yet.** There is no `tidalamp-win` on PyPI and no winget
+> manifest, because the port is not finished. Everything in this section describes the
+> intended channels. The only thing you can do with this repository today is read
+> [`windows.md`](windows.md) and work on it.
 
 ### Requirements
 
-**Python 3.11 or newer.** Debian 12, Ubuntu 24.04, Fedora 39 and current Arch all
-qualify. Ubuntu 22.04 (3.10) and Debian 11 (3.9) do not, and `pipx` there fails while
-resolving the version rather than while running.
+**Windows 10 (21H2) or newer.** Windows 11 is what development targets.
 
-**pip does not install `mpv`.** It is a system package and must be present, or
-tidalamp exits on startup saying so. `cava` is optional and gives a real spectrum
-instead of the RMS meter.
+**Windows Terminal, not the legacy console host.** The TUI runs in both, but `conhost`
+handles colours, resizing and repaint speed differently, and a full-screen retro
+interface is exactly the kind of program that shows the difference. Windows Terminal
+ships with Windows 11 and installs from the Store on Windows 10.
 
-| | mpv | cava (optional) |
-| --- | --- | --- |
-| Debian, Ubuntu, Mint, Pop!_OS | `sudo apt install mpv` | `sudo apt install cava` |
-| Fedora, Nobara | `sudo dnf install mpv` | `sudo dnf install cava` |
-| openSUSE | `sudo zypper install mpv` | `sudo zypper install cava` |
-| Arch, Manjaro, EndeavourOS | `sudo pacman -S mpv` | `sudo pacman -S cava` |
+**Python 3.11 or newer**, if you install from PyPI. The standalone installer carries
+its own interpreter and does not need one.
 
-If mpv is missing, tidalamp reads `/etc/os-release` and names the command for the
-system it is on, so the error is actionable wherever you run it. `cava` is not
-packaged everywhere; where it is missing, the RMS meter takes over and nothing else
-changes.
+**pip does not install `mpv`.** It is a separate program and must be present, or
+tidalamp exits on startup saying so.
+
+| | mpv |
+| --- | --- |
+| winget (built into Windows 11) | `winget install mpv` |
+| Scoop | `scoop install mpv` |
+| Chocolatey | `choco install mpv` |
+| By hand | a build from [mpv.io](https://mpv.io/installation/), unpacked somewhere on `PATH` |
+
+If mpv is missing, tidalamp looks for winget, Scoop and Chocolatey in that order and
+names the command for whichever you have, so the error is actionable rather than merely
+true. It also looks for `mpv.exe` in the usual install locations before giving up, since
+mpv is often installed without ending up on `PATH`; failing that, `mpv_path` in the
+config file points at it directly.
+
+**`cava` has no Windows build**, so the FFT spectrum is not available and the visualizer
+uses the built-in RMS meter. Nothing else changes.
 
 ### From PyPI
 
-This is the channel for every distribution today, Arch included.
+For anyone who already has Python.
 
-```sh
-pipx install "tidalamp[art]"  # the art extra adds Pillow for cover rendering
+```powershell
+pipx install "tidalamp-win[art]"  # the art extra adds Pillow for cover rendering
 tidalamp
 ```
 
 Without the `art` extra everything works except the cover, which is simply not drawn;
 tidalamp says so once in the status line at startup.
 
+The package is `tidalamp-win`; the command it installs is `tidalamp`.
+
 The first launch has to be from a terminal (`tidalamp login`, then `tidalamp`). The
-player then asks whether to add itself to the application menu: see
-[In the application menu](#in-the-application-menu).
+player then asks whether to add itself to the Start menu: see
+[In the Start menu](#in-the-start-menu).
 
-### Arch Linux (AUR)
+### From winget
 
-There is no AUR package to install yet, so `yay` has nothing to find — use PyPI above.
-When new-account registration reopens, `yay -S tidalamp` becomes the recommended Arch
-route, because the AUR can declare `mpv` as a real dependency and `cava` as optional.
+For anyone who would rather not know Python exists. This installs a standalone build
+with its own interpreter, and creates the Start menu shortcut itself.
+
+```powershell
+winget install wh01s17.tidalamp-win
+```
+
+You still need mpv separately, for the reason in Requirements.
 
 ### From the repository
 
-```sh
+```powershell
 python -m venv .venv
-.venv/bin/pip install -e ".[art]"   # drop [art] only if you do not want cover art
-.venv/bin/tidalamp login
-.venv/bin/tidalamp
+.venv\Scripts\pip install -e ".[art]"   # drop [art] only if you do not want cover art
+.venv\Scripts\tidalamp login
+.venv\Scripts\tidalamp
 ```
 
 Running `tidalamp` with no subcommand opens the player. The explicit `tidalamp tui`
@@ -111,8 +144,9 @@ in [`packaging/README.md`](packaging/README.md).
 
 ### Updating
 
-```sh
-pipx upgrade tidalamp
+```powershell
+pipx upgrade tidalamp-win      # installed from PyPI
+winget upgrade wh01s17.tidalamp-win   # installed from winget
 ```
 
 pipx reinstalls from the spec it was given, so the `art` extra is kept. `pipx
@@ -122,22 +156,22 @@ Right after a release, pipx may still answer *already at latest version* with th
 previous number: pip caches the package index for a few minutes. Either wait, or skip
 the cache for one run:
 
-```sh
-PIP_NO_CACHE_DIR=1 pipx upgrade tidalamp
+```powershell
+$env:PIP_NO_CACHE_DIR=1; pipx upgrade tidalamp-win
 ```
 
 From a repository checkout instead:
 
-```sh
+```powershell
 git pull
-.venv/bin/pip install -e ".[art]"
+.venv\Scripts\pip install -e ".[art]"
 ```
 
-`mpv` and `cava` are system packages — your distribution updates those, not pipx.
+`mpv` is a separate program — whatever you installed it with updates it, not pipx.
 
 To check which version is running:
 
-```sh
+```powershell
 tidalamp --version    # or -v
 ```
 
@@ -162,16 +196,16 @@ Three things had to be right for that, and two of them are not in the player:
 
 - **The stream.** Hi-res arrives as a segmented DASH manifest, which needs rewriting
   before ffmpeg will open it.
-- **The graph.** PipeWire runs at one sample rate and resamples everything into it, so
-  a 24/96 stream commonly reaches the DAC at 48 kHz while every badge tells the truth
-  about the stream. The settings window detects this, says so plainly, and fixes it —
-  see [The audio stack](#the-audio-stack).
+- **The output mode.** In shared mode the Windows audio engine resamples everything to
+  the device's configured Default Format, so a 24/96 stream commonly reaches the DAC at
+  48 kHz while every badge tells the truth about the stream. Exclusive mode is what
+  gets around it — see [The audio stack](#the-audio-stack).
 - **The chain.** No software volume attenuation and no filters: with the balance
   centred and the equalizer flat, mpv carries `astats` alone, which measures and does
   not touch the signal.
 
 Bluetooth cannot carry any of this, whatever the rates say, and the settings window
-warns when the output is a Bluetooth sink.
+warns when the output is a Bluetooth device.
 
 ## Keys
 
@@ -234,8 +268,8 @@ work in it as they do everywhere.
 
 <table>
   <tr>
-    <td width="50%"><img src="https://raw.githubusercontent.com/wh01s17/tidalamp/main/img/fullscreen.webp?v=0.13.0" alt="The full-screen view: an album cover centred on a black ground, and a bar at the foot with the track, artist and album on the left, the shuffle, previous, pause, next and repeat controls over the seek bar and the times in the middle, and the quality, the queue button and the keys on the right"></td>
-    <td width="50%"><img src="https://raw.githubusercontent.com/wh01s17/tidalamp/main/img/fullscreen-queue.webp?v=0.13.0" alt="The same view with the queue open on the right: thirty numbered tracks with their lengths, the playing one highlighted, and the cover shifted left to make room"></td>
+    <td width="50%"><img src="https://raw.githubusercontent.com/wh01s17/tidalamp-win/main/img/fullscreen.webp?v=0.13.0" alt="The full-screen view: an album cover centred on a black ground, and a bar at the foot with the track, artist and album on the left, the shuffle, previous, pause, next and repeat controls over the seek bar and the times in the middle, and the quality, the queue button and the keys on the right"></td>
+    <td width="50%"><img src="https://raw.githubusercontent.com/wh01s17/tidalamp-win/main/img/fullscreen-queue.webp?v=0.13.0" alt="The same view with the queue open on the right: thirty numbered tracks with their lengths, the playing one highlighted, and the cover shifted left to make room"></td>
   </tr>
   <tr>
     <td align="center"><sub>The cover as large as the terminal allows</sub></td>
@@ -317,7 +351,7 @@ top of the window you are reading. The change applies immediately — the cover 
 with the new protocol without restarting tidalamp.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/wh01s17/tidalamp/main/img/transparency.webp?v=0.13.0" alt="The settings window over a translucent scrim, with the player dimmed behind it: transparency is on and the cover has been moved to blocks" width="880">
+  <img src="https://raw.githubusercontent.com/wh01s17/tidalamp-win/main/img/transparency.webp?v=0.13.0" alt="The settings window over a translucent scrim, with the player dimmed behind it: transparency is on and the cover has been moved to blocks" width="880">
 </p>
 
 The settings window over the scrim. `Transparencia` is on, and `Carátula` sitting on
@@ -379,7 +413,7 @@ Opened levels are cached for the lifetime of the application, so returning to on
 instant. `R` fetches the current level again, which is useful after creating a
 playlist on another device.
 
-The queue is stored at `~/.local/state/tidalamp/queue.json` and restored on startup,
+The queue is stored at `%LOCALAPPDATA%\tidalamp\state\queue.json` and restored on startup,
 including the previous cursor. Anything slow runs in the background, and a spinner
 names what is pending — `⠋ opening My playlist…` — instead of freezing the interface.
 
@@ -475,8 +509,8 @@ strictly better than the old default.
 When TIDAL delivers less than requested, the status bar says so (`TIDAL delivered
 HIGH, not HI_RES_LOSSLESS`) instead of leaving the badge to imply it.
 
-```sh
-TIDALAMP_QUALITY=HIGH tidalamp
+```powershell
+$env:TIDALAMP_QUALITY="HIGH"; tidalamp
 ```
 
 Valid values are `LOW`, `HIGH`, `LOSSLESS`, and `HI_RES_LOSSLESS`.
@@ -503,16 +537,16 @@ both can be changed from the settings window (`o`) without restarting playback.
 
 <table>
   <tr>
-    <td width="50%"><img src="https://raw.githubusercontent.com/wh01s17/tidalamp/main/img/theme-quattro.webp?v=0.13.0" alt="The quattro layout"></td>
-    <td width="50%"><img src="https://raw.githubusercontent.com/wh01s17/tidalamp/main/img/theme-retro.webp?v=0.13.0" alt="The retro layout"></td>
+    <td width="50%"><img src="https://raw.githubusercontent.com/wh01s17/tidalamp-win/main/img/theme-quattro.webp?v=0.13.0" alt="The quattro layout"></td>
+    <td width="50%"><img src="https://raw.githubusercontent.com/wh01s17/tidalamp-win/main/img/theme-retro.webp?v=0.13.0" alt="The retro layout"></td>
   </tr>
   <tr>
     <td align="center"><code>theme = "quattro"</code></td>
     <td align="center"><code>theme = "retro"</code></td>
   </tr>
   <tr>
-    <td width="50%"><img src="https://raw.githubusercontent.com/wh01s17/tidalamp/main/img/theme-nova.webp?v=0.13.0" alt="The nova layout"></td>
-    <td width="50%"><img src="https://raw.githubusercontent.com/wh01s17/tidalamp/main/img/theme-ascii.webp?v=0.13.0" alt="The ascii layout"></td>
+    <td width="50%"><img src="https://raw.githubusercontent.com/wh01s17/tidalamp-win/main/img/theme-nova.webp?v=0.13.0" alt="The nova layout"></td>
+    <td width="50%"><img src="https://raw.githubusercontent.com/wh01s17/tidalamp-win/main/img/theme-ascii.webp?v=0.13.0" alt="The ascii layout"></td>
   </tr>
   <tr>
     <td align="center"><code>theme = "nova"</code></td>
@@ -561,7 +595,7 @@ picture. Choosing a themed look sets its palette and its picture once; after tha
 are yours to change, so any theme, palette and picture can be mixed.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/wh01s17/tidalamp/main/img/split-backdrop.webp?v=0.13.0" alt="The split arrangement: timed lyrics above the cover and the clock on the left, the queue on the right with a purple armoured figure drawn dimly behind its rows, and the transport keys running across both columns" width="880">
+  <img src="https://raw.githubusercontent.com/wh01s17/tidalamp-win/main/img/split-backdrop.webp?v=0.13.0" alt="The split arrangement: timed lyrics above the cover and the clock on the left, the queue on the right with a purple armoured figure drawn dimly behind its rows, and the transport keys running across both columns" width="880">
 </p>
 
 Split, with the timed lyrics following the song above the cover. The queue carries the
@@ -569,45 +603,45 @@ Split, with the timed lyrics following the song above the cover. The queue carri
 
 ### Palettes
 
-`palette` accepts `auto` (follow Omarchy), `classic` (green-on-black, the player's own),
-the built-ins `tokyo-night`, `catppuccin`, `nord`, `gruvbox` and `black` (pure black
-with grey and white accents, where lightness carries what hue carries elsewhere), the
-ten that come with the themed looks, or the name of a TOML file you drop in `~/.config/tidalamp/palettes/`. Custom palettes use the same format as
-Omarchy's `colors.toml`, so the built-ins and your own work on any Linux, with or
-without Omarchy.
+`palette` accepts `classic` (green-on-black, the player's own), the built-ins
+`tokyo-night`, `catppuccin`, `nord`, `gruvbox` and `black` (pure black with grey and
+white accents, where lightness carries what hue carries elsewhere), the ten that come
+with the themed looks, or the name of a TOML file you drop in
+`%APPDATA%\tidalamp\palettes\`.
 
-The same layout, repainted. These are Omarchy themes picked up through `auto`, plus
-the player's own `classic` green-on-black, which is what you get anywhere else.
+Custom palettes keep the format the Linux version uses, which is
+[Omarchy](https://omarchy.org)'s `colors.toml`. That is not an accident and not a
+leftover: a palette file written on a Linux machine works here unchanged, and the
+format is a plain table of colour names, so nothing about it needs a desktop
+environment. `auto` follows the system theme where there is one to follow, and falls
+back to `classic` here.
+
+The same layout, repainted.
 
 <table>
   <tr>
-    <td width="20%"><img src="https://raw.githubusercontent.com/wh01s17/tidalamp/main/img/palette-emerald.webp?v=0.13.0" alt="Bright green on black"></td>
-    <td width="20%"><img src="https://raw.githubusercontent.com/wh01s17/tidalamp/main/img/palette-green.webp?v=0.13.0" alt="Muted green on black"></td>
-    <td width="20%"><img src="https://raw.githubusercontent.com/wh01s17/tidalamp/main/img/palette-mint.webp?v=0.13.0" alt="Green on navy"></td>
-    <td width="20%"><img src="https://raw.githubusercontent.com/wh01s17/tidalamp/main/img/palette-amber.webp?v=0.13.0" alt="Amber on black"></td>
-    <td width="20%"><img src="https://raw.githubusercontent.com/wh01s17/tidalamp/main/img/palette-sand.webp?v=0.13.0" alt="Sand on warm grey"></td>
+    <td width="20%"><img src="https://raw.githubusercontent.com/wh01s17/tidalamp-win/main/img/palette-emerald.webp?v=0.13.0" alt="Bright green on black"></td>
+    <td width="20%"><img src="https://raw.githubusercontent.com/wh01s17/tidalamp-win/main/img/palette-green.webp?v=0.13.0" alt="Muted green on black"></td>
+    <td width="20%"><img src="https://raw.githubusercontent.com/wh01s17/tidalamp-win/main/img/palette-mint.webp?v=0.13.0" alt="Green on navy"></td>
+    <td width="20%"><img src="https://raw.githubusercontent.com/wh01s17/tidalamp-win/main/img/palette-amber.webp?v=0.13.0" alt="Amber on black"></td>
+    <td width="20%"><img src="https://raw.githubusercontent.com/wh01s17/tidalamp-win/main/img/palette-sand.webp?v=0.13.0" alt="Sand on warm grey"></td>
   </tr>
   <tr>
-    <td width="20%"><img src="https://raw.githubusercontent.com/wh01s17/tidalamp/main/img/palette-orange.webp?v=0.13.0" alt="Orange on navy"></td>
-    <td width="20%"><img src="https://raw.githubusercontent.com/wh01s17/tidalamp/main/img/palette-cyan.webp?v=0.13.0" alt="Cyan on a dark ground"></td>
-    <td width="20%"><img src="https://raw.githubusercontent.com/wh01s17/tidalamp/main/img/palette-blue.webp?v=0.13.0" alt="Blue on navy"></td>
-    <td width="20%"><img src="https://raw.githubusercontent.com/wh01s17/tidalamp/main/img/palette-daylight.webp?v=0.13.0" alt="Blue on cream"></td>
-    <td width="20%"><img src="https://raw.githubusercontent.com/wh01s17/tidalamp/main/img/palette-paper.webp?v=0.13.0" alt="Grey on white"></td>
+    <td width="20%"><img src="https://raw.githubusercontent.com/wh01s17/tidalamp-win/main/img/palette-orange.webp?v=0.13.0" alt="Orange on navy"></td>
+    <td width="20%"><img src="https://raw.githubusercontent.com/wh01s17/tidalamp-win/main/img/palette-cyan.webp?v=0.13.0" alt="Cyan on a dark ground"></td>
+    <td width="20%"><img src="https://raw.githubusercontent.com/wh01s17/tidalamp-win/main/img/palette-blue.webp?v=0.13.0" alt="Blue on navy"></td>
+    <td width="20%"><img src="https://raw.githubusercontent.com/wh01s17/tidalamp-win/main/img/palette-daylight.webp?v=0.13.0" alt="Blue on cream"></td>
+    <td width="20%"><img src="https://raw.githubusercontent.com/wh01s17/tidalamp-win/main/img/palette-paper.webp?v=0.13.0" alt="Grey on white"></td>
   </tr>
 </table>
 
-On Omarchy, tidalamp reads the active palette from
-`$XDG_STATE_HOME/omarchy/current/theme/colors.toml` (or
-`~/.local/state/omarchy/current/theme/colors.toml`) and applies it throughout the UI.
-Changing the theme while the TUI is open updates the palette within two seconds
-without disturbing playback. Everywhere else, and for a missing or invalid file, it
-falls back to its own green-on-black `classic`. The integration only reads Omarchy
-state; it does not modify themes or require the `omarchy` command.
+A palette file that is missing or invalid falls back to the player's own green-on-black
+`classic` rather than failing — the same treatment a typo in the config file gets.
 
 ## Settings
 
 `o` opens a settings window — the transport bar lists it, next to `? help`. Every row
-writes `~/.config/tidalamp/config.toml`, so a change made once stays made.
+writes `%APPDATA%\tidalamp\config.toml`, so a change made once stays made.
 
 | Setting   | Values                                    | Takes effect   |
 | --------- | ----------------------------------------- | -------------- |
@@ -619,6 +653,8 @@ writes `~/.config/tidalamp/config.toml`, so a change made once stays made.
 | Autoplay  | on / off                                  | immediately    |
 | Normalised volume | `off` `track` `album`             | immediately    |
 | Library view | `list` `grid`                          | the next level opened |
+| Exclusive mode | on / off                             | the next track |
+| Output device | the WASAPI devices mpv reports         | the next track |
 | Debug log | on / off                                  | immediately    |
 | Menu shortcut | created / not created                 | immediately    |
 | Log out   | action                                    | closes tidalamp |
@@ -634,16 +670,15 @@ warning) glide there and back when they do not fit, as the track title does.
 
 Log out deletes the saved session and closes tidalamp; to use it again, run
 `tidalamp login`. Its question has a box to delete tidalamp's data too:
-`~/.config/tidalamp`, `~/.local/state/tidalamp` and `~/.cache/tidalamp` (settings,
-queue, equaliser, covers) and any launcher for tidalamp in
-`~/.local/share/applications`, with its icon. The next start is then a first start,
-and asks about the menu again. Launchers installed system-wide by a package are left
-alone.
+`%APPDATA%\tidalamp`, `%LOCALAPPDATA%\tidalamp\state` and
+`%LOCALAPPDATA%\tidalamp\cache` (settings, queue, equaliser, covers) and any shortcut
+for tidalamp in your Start menu, with its icon. The next start is then a first start,
+and asks about the menu again. Shortcuts installed machine-wide by an installer are
+left alone.
 
-Quality, Hi-res rates in PipeWire, Restart PipeWire, Menu shortcut and Log out do not
-change with the arrows,
-since a stray press on any of them costs more than a colour: Enter opens a list to
-choose from, and Restart's and Log out's lists open on Cancel.
+Quality, Exclusive mode, Output device, Menu shortcut and Log out do not change with
+the arrows, since a stray press on any of them costs more than a colour: Enter opens a
+list to choose from, and Log out's list opens on Cancel.
 
 `tidalamp config` shows the effective settings and creates the file if it does not
 exist:
@@ -662,7 +697,9 @@ visualizer = "bars"           # analyzer shape: bars, mirror, curve, or fine
 autoplay = false              # when the queue ends, carry on with the last track's radio
 replaygain = "off"            # normalised volume: off, track, or album
 library_view = "list"         # the library as a list, or as a grid of covers
-debug = false                 # log to ~/.local/state/tidalamp/tidalamp.log
+exclusive = false             # WASAPI exclusive mode: bit-perfect, and nothing else sounds
+mpv_path = ""                 # where mpv.exe is, when it is not on PATH
+debug = false                 # log to %LOCALAPPDATA%\tidalamp\state\tidalamp.log
 
 [keys]
 play = "p"
@@ -685,37 +722,40 @@ keys with commas. Valid actions are the ones in the [key table](#keys), and
 The same window shows what is underneath mpv, because nothing else can:
 
 ```
-  Hi-res rates in PipeWire   not configured
-                               the graph is stuck at 48000 Hz and resamples…
-  Restart PipeWire           action
+  Exclusive mode (WASAPI)    off
+                               the audio engine is at 48000 Hz and resamples…
+  Output device              Your USB DAC (WASAPI)
 
-  Output: Your USB DAC Analog Stereo · 48000 Hz s32le
+  Output: Your USB DAC · 48000 Hz s32le
 ```
 
-PipeWire runs its graph at one sample rate and resamples everything into it. By
-default that is often a single allowed rate, so a 24/96 stream reaches the DAC at
-48 kHz: the badge in the player is telling the truth about the stream, and the DAC
-still never sees hi-res. **Hi-res rates in PipeWire** drops a file into
-`~/.config/pipewire/pipewire.conf.d/` that lets the graph follow the stream, and
-**Restart PipeWire** applies it — stopping playback first, since mpv is holding the
-sink.
+Windows mixes every application into one stream at one sample rate, the device's
+**Default Format** in the Sound control panel, and resamples anything that does not
+match. So a 24/96 stream reaches the DAC at 48 kHz: the badge in the player is telling
+the truth about the stream, and the DAC still never sees hi-res. Nothing inside a
+shared-mode application can change that, which is why the window says it rather than
+pretending otherwise.
 
-PipeWire only picks a new rate while the device is idle, and between tracks it never
-is. So when a track's rate differs from the DAC's, tidalamp sets `clock.force-rate`
-for the moment it takes the DAC to switch, then puts it back to `0`. It does not
-force anything while another application is playing through the same output. If
-the two rates still differ, the `OUT` badge says `resampled from … kHz` and this
-window adds a warning line.
+**Exclusive mode** is the way around it. mpv takes the device for itself and opens it at
+the source's own rate, which is bit-perfect and follows every track without the manual
+dance the control panel would need. The cost is in the name: while tidalamp is playing,
+**nothing else on the machine can make a sound** — no notifications, no browser, no
+other player. That is why it is off by default and has to be turned on deliberately.
+
+Without exclusive mode, the other option is manual: set the Default Format in the Sound
+control panel to the rate you listen at most, and accept resampling for the rest. If the
+track's rate and the device's differ, the `OUT` badge says `resampled from … kHz`.
 
 The window also names the output and warns when it is Bluetooth, which cannot carry
-lossless whatever the rates say. Both actions are reversible: the row toggles the file
-back off, and deleting it by hand does the same.
+lossless whatever the rates say. Exclusive mode is reversible from the same row, and
+nothing it does survives turning it off.
 
 ### Language
 
 English and Spanish are built in; Spanish is the fallback for unsupported locales.
-With `auto`, the standard `LANGUAGE`, `LC_ALL`, `LC_MESSAGES`, and `LANG` variables
-are consulted in that order.
+With `auto`, the standard `LANGUAGE`, `LC_ALL`, `LC_MESSAGES`, and `LANG` variables are
+consulted in that order — they are not usually set on Windows, and when none of them is,
+the Windows display language decides.
 
 ```toml
 language = "en"   # auto, es, or en
@@ -728,8 +768,8 @@ still works under the other.
 
 To override for one run:
 
-```sh
-TIDALAMP_LANG=en tidalamp
+```powershell
+$env:TIDALAMP_LANG="en"; tidalamp
 ```
 
 ## Lyrics
@@ -757,33 +797,30 @@ gains rather than remembered.
 The position, volume and balance bars also accept a click; clicking position while no
 track is loaded does nothing.
 
-Settings are stored in `~/.local/state/tidalamp/settings.json` and reapplied on
+Settings are stored in `%LOCALAPPDATA%\tidalamp\state\settings.json` and reapplied on
 startup.
 
 ## About the analyzer
 
 The quality display identifies which of two modes is active:
 
-- **`FFT`:** with [cava](https://github.com/karlstav/cava) installed, tidalamp runs it
-  against the audio sink and draws the measured spectrum — a real FFT.
-- **`RMS`:** without cava, mpv exposes only levels through its `astats` filter. The
-  analyzer becomes a band-shaped meter with fast attack and slow decay. It reacts to
-  music but is not a frequency breakdown, and the badge says so.
+- **`RMS`:** mpv exposes levels through its `astats` filter, and the analyzer becomes a
+  band-shaped meter with fast attack and slow decay. It reacts to music but is not a
+  frequency breakdown, and the badge says so. **This is what you get on Windows.**
+- **`FFT`:** a real spectrum, measured by [cava](https://github.com/karlstav/cava). cava
+  is a Linux program with no Windows build, so this mode belongs to
+  [the Linux version](https://github.com/wh01s17/tidalamp) and the badge never shows it
+  here.
 
-Installing cava is enough; no configuration is needed — see
-[Requirements](#requirements) for the command on your distribution. If cava is
-missing, dies, or cannot open the sink, tidalamp returns to the RMS meter without
-interrupting playback.
-
-One honest caveat: cava listens to the **sink**, not specifically to tidalamp's mpv
-process. It displays everything playing on the machine, which is usually just
-tidalamp.
+A real FFT is possible on Windows — loopback capture through WASAPI, with the transform
+done in-process — and it would fix the caveat cava has always had on Linux, where it
+listens to the whole output device rather than to tidalamp specifically and so shows
+whatever the machine is playing. It is not implemented; see `next.md`.
 
 ### Shapes
 
-The `visualizer` setting picks how that spectrum is drawn. All four read the same
-frame, so switching between them costs a redraw and nothing else — cava is never
-restarted, and neither is the music.
+The `visualizer` setting picks how that meter is drawn. All four read the same frame, so
+switching between them costs a redraw and nothing else — the music is never interrupted.
 
 | Shape    | What it draws                                                |
 | -------- | ------------------------------------------------------------ |
@@ -815,14 +852,21 @@ Album art is drawn to the left of the display, in a box that grows with the term
 from 18×9 cells up to 40×20. The renderer is selected automatically from the
 terminal's capabilities:
 
-| Protocol       | Terminals                   | Result                        |
+| Protocol       | Terminals on Windows        | Result                        |
 | -------------- | --------------------------- | ----------------------------- |
-| kitty graphics | kitty, Ghostty, WezTerm     | real pixels                   |
-| sixel          | foot, mlterm, contour, yaft | real pixels                   |
-| blocks         | any other terminal          | four samples per cell, two colours |
+| kitty graphics | WezTerm                     | real pixels                   |
+| sixel          | Windows Terminal 1.22+      | real pixels                   |
+| blocks         | any other terminal, including conhost | four samples per cell, two colours |
 
-Detection reads `$TERM`, `$TERM_PROGRAM`, and `$KITTY_WINDOW_ID`, and falls back to
-blocks, which work everywhere.
+**Blocks are the default here**, and on most Windows machines they are what you get.
+The pixel protocols are a Unix terminal tradition that Windows has only recently begun
+to pick up: Windows Terminal gained sixel in 1.22, WezTerm speaks kitty graphics
+because it is a port of a Unix terminal, and the console host speaks neither.
+
+Detection reads `$WT_SESSION`, `$TERM_PROGRAM`, `$WEZTERM_EXECUTABLE` and `$TERM`, and
+falls back to blocks, which work everywhere. Blocks are also what you want if anything
+looks wrong: a sixel sent to a terminal that does not understand it prints garbage
+across the screen, while blocks are ordinary characters and cannot fail.
 
 `cover_shape = "round"` (Cover shape in the settings window) draws the cover as a disc,
 under any theme. The corners are painted in the band's own colour rather than left
@@ -840,52 +884,49 @@ is asked of a font that was not asked before.
 
 To force a renderer:
 
-```sh
-TIDALAMP_ART=blocks tidalamp   # kitty | sixel | blocks | off
+```powershell
+$env:TIDALAMP_ART="blocks"; tidalamp   # kitty | sixel | blocks | off
 ```
 
 **Pillow** is required to decode images, and the `art` extra installs it
-(`pipx install "tidalamp[art]"`). Without it, cover art is omitted and everything else
-keeps working — the same treatment as a missing cava — and the status bar says so at
-startup. Covers are cached under `~/.cache/tidalamp/art/`, keyed by URL.
+(`pipx install "tidalamp-win[art]"`). Without it, cover art is omitted and everything
+else keeps working — the same treatment a terminal with no pixel protocol gets — and the
+status bar says so at startup. Covers are cached under
+`%LOCALAPPDATA%\tidalamp\cache\art\`, keyed by URL.
 
-## Desktop integration (MPRIS)
+## Desktop integration
 
-On startup, tidalamp publishes `org.mpris.MediaPlayer2.tidalamp` on the session bus.
-Anything that speaks MPRIS can see it without extra configuration:
+> [!NOTE]
+> **This is the one feature the port loses, at least for now.** On Linux, tidalamp
+> publishes itself over MPRIS, so media keys, the desktop's own media widget and status
+> bars all see the track and can control it. Windows has an equivalent — the System
+> Media Transport Controls, the panel that appears when you press a media key — but it
+> is bound to a window handle, and a terminal application does not have one. Getting
+> there means creating a hidden window with its own message loop, which is real work
+> and is not done.
+>
+> Until it is, the media keys will not reach tidalamp and nothing outside the terminal
+> knows what is playing. Everything inside the player works exactly as documented.
 
-```sh
-playerctl -p tidalamp play-pause
-playerctl -p tidalamp metadata
-```
+Playback is controlled from the player's own keys: `z` `x` `c` `v` for previous,
+play/pause, stop and next, with the full list under `?`.
 
-This supports Hyprland media keys, Waybar's `mpris` module (including cover art
-through `mpris:artUrl`), and external widgets such as a Quickshell frontend. The
-complete queue is published as `org.mpris.MediaPlayer2.TrackList`, so a client can
-list it and jump to any row.
+The speed lives in its own window (`b`), between 0.25× and 2× in quarters, with the
+pitch preserved.
 
-If there is no session bus, playback still starts and the status bar reports that
-MPRIS is unavailable.
+### In the Start menu
 
-The speed goes over MPRIS too: `Rate` reads and sets it, between `MinimumRate` 0.25
-and `MaximumRate` 2. A desktop may send any number in that range; it lands on the
-nearest quarter, the speeds the `b` window offers, and 0 is ignored.
+pipx installs a command and nothing else, so the Start menu does not know about
+tidalamp. The first time the player opens (logged in, with mpv present) it asks in a
+dialog whether to add it:
 
-### In the application menu
-
-pipx installs a command and nothing else, so the menu does not know about tidalamp.
-The first time the player opens (logged in, with mpv present) it asks in a dialog
-whether to add it:
-
-- **yes** writes `~/.local/share/applications/tidalamp.desktop` and its icon. From
-  then on it is in the menu of any freedesktop desktop. On Omarchy it opens in
-  Omarchy's own terminal, tiled, the way `omarchy-tui-install` does it.
+- **yes** writes `TidalAmp.lnk` into your Start menu, with its icon. It opens in
+  Windows Terminal where that is installed, and in the console host otherwise.
 - **no** is remembered, and the question is not asked again.
 - **Esc** leaves it for the next start.
 
-If a launcher for tidalamp already exists, under any name (the AUR package's, or one
-made with `omarchy-tui-install`), nothing is asked. To take it out of the menu, delete
-the file: it will not be offered again.
+If a shortcut for tidalamp already exists — the winget installer creates one — nothing
+is asked. To take it out of the menu, delete it: it will not be offered again.
 
 **Menu shortcut**, under General in the settings window (`o`), does the same at any
 time, even after a no: it says `created` or `not created`, Enter offers to create it,
@@ -922,42 +963,46 @@ If mpv dies, tidalamp starts a fresh process and reloads the current track. Expi
 tokens are refreshed automatically; `tidalamp login` is only needed when there is no
 usable refresh token. Failed TIDAL calls are retried with backoff.
 
-**If `OUT` sits below `SRC` and the settings window reports nothing wrong**, the limit
-is the USB link, not the graph. A cable that negotiates full speed instead of high
-speed caps many DACs at 16 bit / 96 kHz, and the kernel says so:
+**If the interface looks wrong — smeared colours, a cover that is a grey slab, rows that
+do not line up** — try Windows Terminal before anything else. The console host renders
+differently and it is where this kind of thing shows up first.
 
-```sh
-journalctl -k -b | grep -i "top speed"
-# usb 1-4.3: not running at top speed; connect to a high speed hub
-```
+**If `OUT` sits below `SRC`**, the audio engine is resampling. That is the normal state
+of a shared-mode Windows output and it is not a fault: see
+[The audio stack](#the-audio-stack) for the two ways around it.
 
-`/proc/asound/card*/stream0` lists the formats and rates the device is offering on the
-link it actually got. Try another cable and a direct port before suspecting the
-software: the badge is reporting the truth about hardware that has quietly downgraded
-itself.
+**If the rate is right and the DAC still says otherwise**, the limit is the USB link
+rather than anything in software. A cable that negotiates full speed instead of high
+speed caps many DACs at 16 bit / 96 kHz. Device Manager will show the device connected
+to a full-speed hub; try another cable and a port directly on the machine before
+suspecting the player, because the badge is reporting the truth about hardware that has
+quietly downgraded itself.
 
-For anything else, `TIDALAMP_DEBUG=1 tidalamp` writes to
-`~/.local/state/tidalamp/tidalamp.log`. The TUI owns the terminal, so logging goes to
-a file.
+**If accented characters or `«»` come out as garbage** in the messages printed before
+the interface opens, the console is using a legacy code page. `PYTHONUTF8=1` fixes it
+for every Python program, not just this one.
+
+For anything else, `TIDALAMP_DEBUG=1` writes to
+`%LOCALAPPDATA%\tidalamp\state\tidalamp.log`. The TUI owns the terminal, so logging
+goes to a file.
 
 ## Platform support
 
-tidalamp is a Linux application. Real playback has been tested on Arch Linux with
-Omarchy, and the automated test suite runs on Ubuntu.
+tidalamp-win targets Windows. **Nothing in this table is tested yet**, because the port
+is not finished; it says what is intended and what the known obstacles are.
 
-| Platform                                                | Status                                                                                                      |
-| ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| Arch Linux / Omarchy                                    | Supported and tested; install from PyPI for now. The AUR package is prepared but not yet published         |
-| Debian / Ubuntu                                         | Supported through PyPI; the automated suite runs on Ubuntu                                                |
-| Fedora, openSUSE, and other desktop Linux distributions | Expected to work through PyPI, but not yet tested with real playback                                      |
-| WSL2                                                    | Best effort; audio must be configured separately and desktop integration may be unavailable                |
-| macOS                                                   | Unsupported and untested; the core may run, but the Linux desktop and audio integrations will not          |
-| Windows                                                 | Not compatible: mpv is controlled through a Unix socket and desktop integration uses D-Bus/MPRIS           |
-| BSD and Android/Termux                                  | Unsupported and untested                                                                                   |
+| Platform                                | Status                                                                                                  |
+| --------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| Windows 11 + Windows Terminal           | The target. What development and CI will run against                                                    |
+| Windows 10 21H2+ + Windows Terminal     | Intended to work; Windows Terminal installs from the Store                                              |
+| Windows 10/11 + console host (conhost)   | Expected to work with blocks for cover art, and to look worse. Checked last, which is how it usually breaks |
+| Windows on ARM                          | Untested. Python and mpv both have ARM64 builds, so it is plausible rather than planned                 |
+| WSL2                                    | Use [the Linux version](https://github.com/wh01s17/tidalamp) inside it — that is what it is for. Audio needs separate setup either way |
+| Linux, macOS, BSD                       | Not this project. Linux is [upstream](https://github.com/wh01s17/tidalamp); macOS and BSD are unsupported in both |
 
-A missing D-Bus session only disables MPRIS and desktop media controls; it does not
-stop playback. Cover art also falls back to terminal blocks when kitty graphics and
-sixel are unavailable.
+Cover art falls back to terminal blocks when no pixel protocol is available, which on
+Windows is most of the time. Desktop media controls are not implemented — see
+[Desktop integration](#desktop-integration).
 
 ## License
 
