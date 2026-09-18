@@ -1,0 +1,3232 @@
+"""The retro-player TUI."""
+
+from __future__ import annotations
+
+import contextlib
+import functools
+import logging
+import time
+from collections.abc import Callable
+from pathlib import Path
+from typing import NamedTuple, cast
+
+import tidalapi
+from rich.cells import cell_len
+from rich.text import Text
+from textual import events, on, work
+from textual.app import App, ComposeResult, ScreenStackError
+from textual.binding import Binding
+from textual.containers import Horizontal, Vertical
+from textual.css.query import NoMatches
+from textual.reactive import reactive
+from textual.widgets import Input, Static
+from textual.worker import get_current_worker
+
+from . import about, artwork, audio, auth, columns, config, desktop, i18n, library
+from .auth import NotLoggedIn, ensure_fresh
+from .i18n import _
+from .layouts import Layout, backdrop_for, layout_for
+from .layouts import label as theme_label
+from .library import Row
+from .lyrics import LyricsDocument, load_lyrics
+from .mpris import MprisService
+from .net import with_retries
+from .player import Mpv
+from .queue import Entry, Queue, Repeat
+from .screens import (
+    BrowserScreen,
+    ChoiceScreen,
+    ConfigScreen,
+    EqScreen,
+    FullscreenScreen,
+    HelpScreen,
+    LyricsScreen,
+    PlaylistNameScreen,
+    PlaylistPickerScreen,
+    RowList,
+    SearchScreen,
+    SpeedScreen,
+    TrackActionsScreen,
+    favourite_message,
+    speed_text,
+)
+from .settings import Settings, replaygain
+from .spectrum import Cava, SpectrumUnavailable
+from .stream import Playable, StreamUnavailable, cleanup_playlists, resolve
+from .theme import LAYOUTS, ThemePalette, load_palette
+from .widgets import (
+    Analyzer,
+    Artwork,
+    Glide,
+    LyricsPane,
+    Marquee,
+    SeekBar,
+    Slider,
+    Spinner,
+    TimeDisplay,
+)
+
+log = logging.getLogger("tidalamp.app")
+
+# What `_resolving` holds after a stop: an entry no resolve is ever for, so
+# whatever comes back late is dropped instead of starting to play.
+_STOPPED = Entry(id=-1, title="", artist="")
+
+
+class _Prepared(NamedTuple):
+    """The next track, resolved ahead and already queued in mpv."""
+
+    entry: Entry
+    playable: Playable
+    # When it was resolved: its URL expires, so it is not kept forever.
+    at: float
+
+
+def _track_path(entry: Entry) -> str:
+    """The D-Bus object path for one queue row.
+
+    Keyed on the row's uid, not on the TIDAL track id: the same song can be in
+    the queue twice, and MPRIS requires the ids in a TrackList to be distinct.
+    """
+    return f"/org/mpris/MediaPlayer2/tidalamp/track/{entry.uid}"
+
+
+def _entry_metadata(entry: Entry) -> dict:
+    return {
+        "trackid": _track_path(entry),
+        "length": float(entry.duration),
+        "title": entry.title,
+        "artist": entry.artist,
+        "album": entry.album,
+        "art_url": entry.art_url,
+        "url": f"tidal://track/{entry.id}",
+    }
+
+
+# Every action a user may rebind. Navigation keys (arrows, page up/down,
+# Enter, Escape) are deliberately not here: they are what makes the browser
+# navigable, and a typo there locks you out of it.
+#
+# The transport runs z x c v across the keyboard in the order the buttons sit
+# on screen, which is easier to find by touch than Winamp's z x c v b — that
+# one spent a key on a separate pause, and pause now shares the play button.
+DEFAULT_KEYS: dict[str, str] = {
+    "prev": "z",
+    # Space is what every other player uses, and nothing in the main window
+    # wanted it. `x` stays first so the transport button keeps its Winamp
+    # letter: `_button_key` draws the first key bound and no more.
+    "play": "x,space",
+    "stop": "c",
+    "next": "v",
+    "search": "slash",
+    "filter_queue": "ctrl+f",
+    "track_menu": "m",
+    "to_playing": "g",
+    "save_playlist": "p",
+    "library": "l",
+    "lyrics": "y",
+    "equalizer": "e",
+    "shuffle": "s",
+    "repeat": "r",
+    "favourite": "f",
+    "unfavourite": "F",
+    "remove": "d,delete",
+    "move_up": "alt+up",
+    "move_down": "alt+down",
+    "clear": "C",
+    "undo_clear": "u",
+    "seek_back": "left",
+    "seek_fwd": "right",
+    "vol_up": "plus,equals_sign",
+    "vol_down": "minus",
+    "balance_left": "comma",
+    "balance_right": "full_stop",
+    "balance_centre": "backslash",
+    "toggle_time": "t",
+    # After z x c v, where Winamp kept its fifth key.
+    "speed": "b",
+    # Only a key opens it: no row in the settings, no button on the player.
+    "fullscreen": "w",
+    "config": "o",
+    "help": "question_mark,h",
+    # `q` asks first: it sits next to `w`, and one slip closed the player.
+    # ctrl+c is the way out that does not ask.
+    "quit": "q",
+    "force_quit": "ctrl+c",
+}
+
+
+def _quiet_after_teardown(method):
+    """Let a timer or a resize that arrives during exit find nothing, quietly.
+
+    Textual's own shutdown tears the screens down, and a tick or a resize
+    already queued can still run after that and look for widgets that are
+    gone, or even for a screen when the stack is already empty. There is
+    nothing left to update then. While the app is running the error goes
+    through: a widget or a screen missing then is a real fault.
+    """
+
+    @functools.wraps(method)
+    def guarded(self, *args, **kwargs):
+        try:
+            return method(self, *args, **kwargs)
+        except (NoMatches, ScreenStackError):
+            if getattr(self, "_running", True):
+                raise
+            return None
+
+    return guarded
+
+
+def keys_for(action: str) -> str:
+    """The key bound to ``action``, from the config file or the default."""
+    override = config.KEYS.get(action)
+    if override:
+        return override
+    if action not in DEFAULT_KEYS:
+        raise KeyError(_("acción desconocida: {action}").format(action=action))
+    return DEFAULT_KEYS[action]
+
+
+def _bind(action: str, description: str, show: bool = False) -> Binding:
+    return Binding(keys_for(action), action, description, show=show)
+
+
+def unknown_key_actions() -> list[str]:
+    """Actions named in the config file that do not exist. For the CLI to warn."""
+    return sorted(set(config.KEYS) - set(DEFAULT_KEYS))
+
+
+# Fixed pieces of the display band, from styles/player.tcss. `_fit_artwork` needs
+# them to work out how much of the row is left for the cover.
+# How long to keep watching the output device after a track starts, and how
+# often. PipeWire's rate switch lands somewhere in the first couple of
+# seconds, and is silent: there is nothing to subscribe to.
+SINK_SETTLE = 4.0
+SINK_POLL = 0.4
+
+CLOCK_WIDTH = 24
+READOUT_WIDTH = 30
+DISPLAY_HEIGHT = 9
+
+
+class MainPanel(Vertical):
+    """The whole UI, in one container that watches its own size.
+
+    ``Resize`` does not bubble and never reaches the App, so the check for a
+    terminal too small to draw has to hang off something that is laid out.
+    This panel is width and height 100%, which makes it the screen's stand-in.
+    """
+
+    def on_resize(self, event) -> None:
+        cast("TidalAmp", self.app)._check_size()
+
+
+class Measured(Static):
+    """A line drawn to its own width: a ruled title, a heading with the hints
+    pushed to the right edge, a menu cropped to fit.
+
+    It redraws itself when its size changes. The app used to guess when that
+    happened (a resize, a change of layout, one refresh after switching the
+    arrangement) and switching back from split beat the guess: the queue's
+    heading kept the half width it had and its hints stopped in the middle.
+    """
+
+    def on_resize(self, event) -> None:
+        app = self.app
+        if isinstance(app, TidalAmp) and app.query("#transport-menu"):
+            app._refresh_widths()
+
+
+class TidalAmp(App):
+    """Main application."""
+
+    # Read in this order; later rules win at equal specificity.
+    CSS_PATH = [
+        "styles/base.tcss",
+        "styles/player.tcss",
+        "styles/compact.tcss",
+        "styles/looks.tcss",
+        "styles/themed.tcss",
+    ]
+    TITLE = "TIDAL AMP"
+
+    # Nothing takes focus on its own. The player is driven by bindings, which
+    # only fire while no widget is eating the keys, and the queue's search box
+    # is a widget that would otherwise grab them at startup and swallow `x`.
+    # Every screen that wants a cursor in a box focuses it itself.
+    AUTO_FOCUS = None
+
+    # At 60×18 the compact layout drops the cover and balance row. Below that
+    # even the transport, a useful queue and the status line cannot coexist.
+    MIN_WIDTH = 60
+    MIN_HEIGHT = 18
+
+    # Where `split` is allowed to put the queue beside the player. The clock
+    # and the readout alone are 54 columns, so the player's half needs close
+    # to the 80 the stacked panel needs whole. The transport is not in the
+    # sum: split runs it under both columns. The height is the compact
+    # threshold, because a player half without its cover is not worth a
+    # column of its own.
+    SPLIT_MIN_WIDTH = 160
+    SPLIT_MIN_HEIGHT = 26
+
+    # Winamp's own transport keys, kept as muscle memory. Rebindable ones come
+    # from DEFAULT_KEYS through the config file; navigation stays fixed.
+    BINDINGS = [
+        _bind("prev", _("anterior"), show=True),
+        _bind("play", "play", show=True),
+        _bind("stop", "stop", show=True),
+        _bind("next", _("siguiente"), show=True),
+        _bind("search", _("buscar"), show=True),
+        _bind("filter_queue", _("buscar en la cola")),
+        _bind("track_menu", _("menú de la pista")),
+        _bind("to_playing", _("volver a la pista que suena")),
+        _bind("save_playlist", _("guardar la cola como playlist")),
+        _bind("library", _("biblioteca"), show=True),
+        _bind("lyrics", _("letra"), show=True),
+        _bind("equalizer", _("ecualizador"), show=True),
+        _bind("shuffle", "shuffle", show=True),
+        _bind("repeat", "repeat", show=True),
+        Binding("up", "cursor_up", _("arriba"), show=False),
+        Binding("down", "cursor_down", _("abajo"), show=False),
+        Binding("pageup", "cursor_page_up", "", show=False),
+        Binding("pagedown", "cursor_page_down", "", show=False),
+        Binding("enter", "play_selected", _("reproducir"), show=False),
+        Binding("escape", "close_queue_filter", "", show=False),
+        _bind("remove", _("quitar")),
+        _bind("move_up", _("subir")),
+        _bind("move_down", _("bajar")),
+        _bind("clear", _("vaciar")),
+        _bind("undo_clear", _("deshacer el vaciado")),
+        _bind("seek_back", "-5s"),
+        _bind("seek_fwd", "+5s"),
+        _bind("vol_up", "vol+"),
+        _bind("vol_down", "vol-"),
+        _bind("balance_left", _("balance izq")),
+        _bind("balance_right", _("balance der")),
+        _bind("balance_centre", _("centrar balance")),
+        _bind("toggle_time", _("tiempo")),
+        _bind("speed", _("velocidad")),
+        _bind("fullscreen", _("pantalla completa")),
+        _bind("favourite", _("favorito")),
+        _bind("unfavourite", _("quitar favorito")),
+        _bind("config", _("config"), show=True),
+        _bind("help", _("ayuda"), show=True),
+        _bind("quit", _("salir"), show=True),
+        # Priority, so it is checked before any window: the way out that does
+        # not ask has to work whatever is open. `q` is not, or typing a «q»
+        # into a search box would quit.
+        Binding(
+            keys_for("force_quit"),
+            "force_quit",
+            _("salir sin preguntar"),
+            show=False,
+            priority=True,
+        ),
+    ]
+
+    status = reactive(_("listo"))
+
+    def __init__(self, session: tidalapi.Session, mpv: Mpv) -> None:
+        self.tidalamp_palette: ThemePalette = load_palette(name=config.PALETTE)
+        super().__init__()
+        self.session = session
+        self.mpv = mpv
+        self.queue = Queue()
+        self.settings = Settings.load()
+        self._lyrics_cache: dict[int, LyricsDocument] = {}
+        # The entry the last resolve was started for. A worker's thread is not
+        # cancelled with it: an older resolve can finish after a newer one was
+        # asked for, and must not start its track over the newer one.
+        self._resolving: Entry | None = None
+        # Which track the split view's lyrics pane was last asked to show, so
+        # the tick fetches once per track rather than four times a second.
+        self._pane_entry: int | None = None
+        self._was_idle = True
+        # Where the track was on the last tick, and the track and second a
+        # restarted mpv has to pick up at. A dead or stuck mpv cannot be
+        # asked where it was, so the tick's own reading is what is kept.
+        self._last_position = 0.0
+        self._resume: tuple[Entry, float] | None = None
+        # The next track, while it resolves ahead and once it is queued in
+        # mpv; and the one whose resolve ahead failed, so the tick does not
+        # ask again four times a second. Only the entry the queue says is
+        # next is ever kept: `_check_prepared` drops anything else.
+        self._prefetching: Entry | None = None
+        self._prepared: _Prepared | None = None
+        self._prefetch_failed: Entry | None = None
+        # mpv being restarted, or asked whether it is back, from a worker:
+        # both wait seconds, and on the UI thread that was a frozen screen.
+        self._recovering = False
+        self._probing = False
+        self._mpv_retry_at = 0.0
+        self.mpris = MprisService(self)
+        self._mpris_ready = False
+        # How this terminal can draw a cover, decided once from the environment.
+        self.art_protocol = artwork.detect_protocol(configured=config.ARTWORK)
+        self._art_url = ""
+        # The outline and ground the cover on screen was cut with, so a look
+        # that changes either draws it again.
+        self._art_look: tuple[str, tuple[int, int, int]] | None = None
+        self._flourish: tuple[str, int] | None = None
+        # The question `q` asks, while it is open.
+        self._quit_question: ChoiceScreen | None = None
+        # A radio being fetched to carry on past the end of the queue: one at
+        # a time, so an idle mpv waiting for it cannot ask again.
+        self._autoplaying = False
+        self._art_hidden = False
+        self._pending_art: artwork.Cover | None = None
+        self._compact = False
+        # cava, when it is installed. None means the RMS fallback.
+        self.cava: Cava | None = None
+        # What the play/pause button is currently drawn as.
+        self._transport_playing = False
+        # What the status line already says, so writing it again is free.
+        self._status_line = ""
+        # Whether a failed save has been reported already. Once a session:
+        # the queue is saved on every track change, and a full disk would
+        # otherwise take the status line over.
+        self._save_warned = False
+        self._transport_hits: list[tuple[int, int, str]] = []
+        self._playable: Playable | None = None
+        self._sink = audio.Sink()
+        # Set by the CLI when this is the first start that can offer a menu
+        # launcher. Off by default, so tests and embedders never see it.
+        self.offer_launcher = False
+        # Set by a logout that takes the app's data: on the way out nothing is
+        # saved, and these are deleted again once mpv has let go, since the
+        # queue, the settings and the covers were being written until then.
+        self.forget_on_exit: tuple[Path, ...] = ()
+        # The rate mpv sends to the sink, read with it: when the two differ,
+        # PipeWire is resampling and the OUT badge says so.
+        self._stream_rate = 0
+        # What the queue is narrowed to, and which queue positions that
+        # leaves on screen. Empty filter means every position, in order.
+        self._queue_filter = ""
+        self._shown: list[int] = []
+        # What `C` threw away, kept for one undo. In memory only: the file is
+        # already overwritten by the time anyone can press the key.
+        self._cleared: tuple[list[Entry], int] | None = None
+        # What is waiting for a destination while the picker is open.
+        self._pending_playlist: list[Entry] = []
+
+    def get_theme_variable_defaults(self) -> dict[str, str]:
+        """Expose the detected palette to the static TCSS stylesheet."""
+        return self.tidalamp_palette.css_variables()
+
+    # ------------------------------------------------------------------ layout
+
+    def compose(self) -> ComposeResult:
+        with MainPanel(id="main"):
+            # markup=False on both headings: a layout that rules them with
+            # «[ TIDAL AMP ]» hands Static a string that Rich would read as a
+            # tag, and the brackets and everything between them disappeared.
+            yield Measured(self._title_text(), id="titlebar", markup=False)
+            # The player and the queue, each in a container of its own even
+            # while they are stacked, and the transport between them as a
+            # sibling of both. `split` lays the three out on a grid with a
+            # class and the stylesheet, and moves the transport under both
+            # columns with `move_child`, which reorders without remounting.
+            # Moving widgets between containers would be remove() and
+            # mount(), which throws away the queue's cursor, the decoded
+            # cover and the marquee's phase.
+            with Vertical(id="player-half"):
+                # Hidden while stacked; `split` gives it the rows of the
+                # column the band does not use.
+                yield LyricsPane(id="lyrics-pane")
+                with Horizontal(id="display"):
+                    yield Artwork(id="art")
+                    with Vertical(id="clockbox"):
+                        yield TimeDisplay(id="clock")
+                        # The rest of the track's identity, under the time:
+                        # the marquee above only has room for one line and it
+                        # spends it on the title.
+                        yield Glide(id="trackmeta")
+                    with Vertical(id="readout"):
+                        yield Marquee(id="marquee")
+                        yield Glide(id="badges")
+                        yield Glide("OUT  —", id="output")
+                        yield Analyzer(id="analyzer")
+                yield SeekBar(id="seek")
+                yield Slider(id="volume")
+                yield Slider(id="balance")
+            # Two halves, not one string: the transport keys belong with the
+            # sliders above them, and the windows read as a menu, which they
+            # only do once there is air between the two. Shuffle and repeat
+            # sit on the left with the transport: they are buttons that hold
+            # a state, not places to go. Both halves are filled in by
+            # `_refresh_modes`, which dims the separators and lights the state.
+            with Horizontal(id="transport"):
+                yield Static("", id="transport-play")
+                yield Measured("", id="transport-menu")
+            with Vertical(id="queue-half"):
+                yield Measured("", id="pl-title", markup=False)
+                yield RowList(id="playlist")
+                # The queue's own search bar, the same shape as the browser's:
+                # it opens under the list without covering it, so the queue
+                # narrows under the eyes of whoever is typing. Hidden until
+                # ctrl+f.
+                with Horizontal(id="queue-filter-bar"):
+                    yield Input(placeholder=_("buscar en la cola…"), id="queue-filter")
+                    # markup=False: it counts rows for text the user typed,
+                    # and a «[» in it would be read as a tag.
+                    yield Static("", id="queue-filter-count", markup=False)
+            with Horizontal(id="statusbar"):
+                yield Spinner(id="busy")
+                yield Static("", id="status", markup=False)
+        yield Static("", id="too-small")
+
+    @_quiet_after_teardown
+    def _check_size(self) -> None:
+        """Cover the UI with an explanation when the terminal is too small."""
+        width, height = self.size.width, self.size.height
+        compact = width < 80 or height < 26
+        compact_changed = compact != self._compact
+        self._compact = compact
+        main = self.query_one("#main")
+        if main.has_class("compact") != compact:
+            main.set_class(compact, "compact")
+        split = self._split_fits(width, height)
+        split_changed = main.has_class("split") != split
+        if split_changed:
+            main.set_class(split, "split")
+            self._place_transport(main, split)
+        self._layout_classes(main)
+        if split_changed:
+            self._replace_pixel_cover()
+        self._fit_artwork(compact_changed or split_changed)
+        self._apply_emblem()
+        # These are all cropped or ruled to their own widget's width, which
+        # only exists after layout. `_check_size` also runs from the resize
+        # that precedes compose, hence the guard.
+        if self.query("#transport-menu"):
+            self._refresh_widths()
+            if split_changed:
+                # The panel kept its size, so no resize is coming to report
+                # the halves' new widths: wait for the layout pass instead.
+                self.call_after_refresh(self._refresh_widths)
+        too_small = width < self.MIN_WIDTH or height < self.MIN_HEIGHT
+        notice = self.query_one("#too-small", Static)
+        notice.display = too_small
+        if too_small:
+            notice.update(
+                Text(
+                    _(
+                        "\n  La ventana es de {width}×{height}.\n"
+                        "  TIDAL AMP necesita al menos {min_width}×{min_height}.\n\n"
+                        "  Agranda el terminal o reduce el tamaño de letra.\n"
+                    ).format(
+                        width=width,
+                        height=height,
+                        min_width=self.MIN_WIDTH,
+                        min_height=self.MIN_HEIGHT,
+                    ),
+                    style=f"bold {self.tidalamp_palette['accent']}",
+                )
+            )
+
+    def _split_fits(self, width: int, height: int) -> bool:
+        """Whether the queue goes beside the player: asked for, and room for it.
+
+        Falling back on its own is the point. Asked for on an ordinary
+        terminal, two columns would be two broken halves, and nothing on
+        screen would say why.
+        """
+        return (
+            config.ARRANGEMENT == "split"
+            and width >= self.SPLIT_MIN_WIDTH
+            and height >= self.SPLIT_MIN_HEIGHT
+        )
+
+    def _place_transport(self, main, split: bool) -> None:
+        """Under both columns in split, between the halves when stacked.
+
+        The grid places its cells in the order of the children, so the row
+        that spans the two columns has to come after the second one.
+        """
+        if not self.query("#transport"):
+            return
+        transport = self.query_one("#transport")
+        queue = self.query_one("#queue-half")
+        if split:
+            main.move_child(transport, after=queue)
+        else:
+            main.move_child(transport, before=queue)
+
+    @property
+    def split(self) -> bool:
+        """Whether the halves are side by side right now."""
+        return self.query_one("#main").has_class("split")
+
+    def _refresh_widths(self) -> None:
+        """Redraw everything that is cropped or ruled to its widget's width.
+
+        A resize is one moment those widths change and switching the
+        arrangement is the other. Both are rare; the ticks are the hot path.
+        """
+        self._apply_visualizer()
+        self._refresh_modes(relayout=True)
+        self._refresh_playlist_title()
+        titlebar = self.query_one("#titlebar", Static)
+        titlebar.update(self._title_text(titlebar.size.width))
+
+    def _replace_pixel_cover(self) -> None:
+        """Take a kitty or sixel cover down and put it straight back.
+
+        Switching the arrangement moves the band the cover sits in without
+        necessarily changing its size, and a pixel picture is not text: the
+        terminal keeps the old placement where it was drawn until something
+        deletes it. Put back through `show`, it is deleted first and drawn
+        again where the band now is, whatever the terminal does with a
+        placement it was not told to remove.
+        """
+        widget = self._artwork()
+        if widget is None or widget.cover is None:
+            return
+        if widget.cover.protocol is artwork.Protocol.BLOCKS:
+            return
+        cover = widget.cover
+        widget.show(None)
+        widget.show(cover)
+
+    def _fit_artwork(self, compact_changed: bool = False) -> None:
+        """Grow the cover box with the terminal, then draw the cover again.
+
+        Two ceilings. Vertically the display band must not eat the playlist,
+        so it takes a quarter of the height; horizontally the box shares its
+        row with the 24-cell clock and the readout, which needs about 30 cells
+        before the marquee stops saying anything useful.
+        """
+        widget = self._artwork()
+        if widget is None:
+            return
+        display = self.query_one("#display")
+        if self._compact:
+            if widget.cover is not None:
+                widget.show(None)
+            if compact_changed:
+                display.styles.height = 5
+            return
+        by_height = self.size.height // 4
+        # Split, the band shares the player's column with the lyrics above
+        # it, and the column is half the panel.
+        room = self.size.width // 2 - 2 if self.split else self.size.width
+        # Six: the band's two cells of left padding and the four of slack.
+        by_width = (room - CLOCK_WIDTH - READOUT_WIDTH - 6) // 2
+        resized = widget.resize(min(by_height, by_width))
+        # Unconditionally, not only when the cover changed size. The padding
+        # is the other half of the sum and it settles on its own schedule: at
+        # startup the layout class is set before Textual has recomputed the
+        # styles, so the first pass reads no padding, and the second pass —
+        # where the real terminal size arrives — resizes nothing and used to
+        # skip the correction. Assigning a height that is already right costs
+        # nothing; getting here and not assigning it cost a row of cover on
+        # top of the seek bar.
+        self._fit_display_band()
+        # resize() dropped the cover it had, because it was the old size. A
+        # compact layout does the same so graphical protocols cannot float
+        # over the queue; expanding fetches it again here.
+        if self._art_url and (resized or widget.cover is None):
+            self._art_worker(self._art_url)
+
+    def _fit_display_band(self) -> None:
+        """Make the band as tall as the cover plus whatever padding it carries.
+
+        `height` is border-box, so padding comes out of the content: a band
+        sized for the cover alone leaves it a row short. And a graphical
+        protocol does not clip to its widget — it paints over whatever is
+        below — so that row lands on the seek bar rather than being cut off.
+
+        Its own function because two things change the sum. The cover resizing
+        is the obvious one; switching layout is the other, since each carries
+        different padding, and for a while that one went unnoticed: the band
+        kept the height worked out under the layout before it.
+        """
+        widget = self._artwork()
+        if widget is None:
+            return
+        display = self.query_one("#display")
+        padding = display.styles.padding
+        display.styles.height = (
+            max(DISPLAY_HEIGHT, widget.rows) + padding.top + padding.bottom
+        )
+
+    @staticmethod
+    def _layout_classes(main) -> None:
+        """Put exactly one layout class on the panel, for the stylesheet.
+
+        Set rather than toggled blindly: `set_class` on an unchanged class
+        still invalidates the styles, and this runs on every resize.
+        """
+        for name in LAYOUTS:
+            wanted = name == config.THEME
+            if main.has_class(name) != wanted:
+                main.set_class(wanted, name)
+
+    @property
+    def layout(self) -> Layout:
+        """The layout in force, read fresh: the settings screen swaps it live."""
+        return layout_for(config.THEME)
+
+    def _title_text(self, width: int = 0) -> str | Text:
+        return self._tinted(self.layout.title(width))
+
+    def _tinted(self, line: str, roles: tuple[str, ...] = ()) -> str | Text:
+        """The line with the look's tinted glyphs in their colours, in turn;
+        the rest keeps whatever colour its widget gives it."""
+        layout = self.layout
+        roles = roles or layout.tint_colors
+        if not layout.tint or not roles:
+            return line
+        colours = [self.tidalamp_palette[role] for role in roles]
+        text = Text(line)
+        found = 0
+        for index, glyph in enumerate(line):
+            if glyph in layout.tint:
+                text.stylize(colours[found % len(colours)], index, index + 1)
+                found += 1
+        return text
+
+    def _cover_look(self) -> tuple[str, tuple[int, int, int]]:
+        """The outline the look cuts the cover to, and the ground its corners
+        take: the band's own, which nova and cuaderno paint as the panel."""
+        background = self.query_one("#display").styles.background
+        if background.a:
+            ground = (background.r, background.g, background.b)
+        else:
+            hex_ = self.tidalamp_palette["display_background"].lstrip("#")
+            ground = (int(hex_[0:2], 16), int(hex_[2:4], 16), int(hex_[4:6], 16))
+        return config.COVER_SHAPE, ground
+
+    def _reshape_art(self) -> None:
+        """Draw the cover again if the look now cuts it differently."""
+        if self._art_url and self._art_look not in (None, self._cover_look()):
+            self._art_worker(self._art_url)
+
+    def _apply_emblem(self) -> None:
+        """Put the look's emblem behind the queue, and its line where the
+        words are not.
+
+        Behind the queue rather than in the cover's box, so it is there the
+        whole time and not only while nothing plays; it has the room there
+        to carry some detail.
+        """
+        if not self.query("#playlist"):
+            return
+        layout = self.layout
+        # The flourish in the frame's foot. Set only when it changes: this
+        # runs on every resize, and each assignment repaints the frame.
+        flourish = (layout.name, id(self.tidalamp_palette))
+        if self._flourish != flourish:
+            self._flourish = flourish
+            self.query_one("#main").border_subtitle = self._tinted(
+                layout.frame_subtitle, layout.flourish_colors
+            )
+        tagline = layout.tagline() if layout.tagline else ""
+        # The picture is its own setting: the theme's by default, any other
+        # look's when the user mixes them, and it keeps the place and size
+        # that look gives it.
+        source = backdrop_for(config.BACKDROP, layout)
+        playlist = self.query_one("#playlist", RowList)
+        if source is None:
+            playlist.set_backdrop(None)
+        else:
+            playlist.set_backdrop(
+                artwork.emblem_path(source.emblem),
+                source.emblem_anchor,
+                source.emblem_scale,
+            )
+        pane = self.query_one(LyricsPane)
+        if pane.tagline != tagline:
+            pane.tagline = tagline
+            pane.refresh()
+        marquee = self.query_one(Marquee)
+        idle = tagline or "TIDAL AMP"
+        if marquee.idle_text != idle:
+            marquee.idle_text = idle
+            marquee.refresh()
+
+    def _apply_appearance(self) -> None:
+        """Apply structure and palette without restarting playback."""
+        self._layout_classes(self.query_one("#main"))
+        self._apply_emblem()
+        # After the refresh: the band's ground is only the new look's once
+        # Textual has restyled it.
+        self.call_after_refresh(self._reshape_art)
+        # Each layout pads the display band differently, so the height worked
+        # out under the last one is wrong under this one.
+        if not self._compact:
+            self._fit_display_band()
+        titlebar = self.query_one("#titlebar", Static)
+        titlebar.update(self._title_text(titlebar.size.width))
+        self._refresh_modes(relayout=True)
+        self._refresh_playlist_title()
+        self.screen.refresh()
+
+    def on_mount(self) -> None:
+        self._check_size()
+        self.query_one("#queue-filter-bar", Horizontal).display = False
+        playlist = self.query_one("#playlist", RowList)
+        playlist.empty_text = _("cola vacía — / para buscar, l para tu biblioteca")
+        volume = self.query_one("#volume", Slider)
+        # Tied to the player's own ceiling rather than left on the widget
+        # default: when the two drifted apart, the bar drew past its track.
+        volume.maximum = Mpv.VOLUME_MAX
+        volume.label = "VOL/mpv"
+        volume.value = self.mpv.volume
+        balance = self.query_one("#balance", Slider)
+        balance.label = "BAL"
+        balance.centred = True
+        self._apply_audio()
+        self._start_spectrum()
+        self._refresh_readout()
+        self._refresh_sink_worker()
+        self.set_interval(1 / 10, self._tick_fast)
+        self.set_interval(1 / 4, self._tick_slow)
+        self.set_interval(2, self._refresh_theme)
+        self.run_worker(self._start_mpris(), exclusive=False)
+
+        if self.queue.load():
+            self._sync_queue()
+            playlist.cursor = max(0, self._row_at(self.queue.resume_at))
+            self.status = _("cola restaurada ({count} pistas)").format(
+                count=len(self.queue)
+            )
+            self._restore_position()
+        self._refresh_modes()
+        self._refresh_playlist_title()
+        # Last, so it wins over the queue-restore message: without Pillow the
+        # cover never appears and nothing else would ever say why.
+        if self.art_protocol is not artwork.Protocol.NONE and not artwork.have_decoder():
+            self.status = _('sin carátula: falta Pillow (pip install "tidalamp[art]")')
+        if self.offer_launcher:
+            self._ask_launcher()
+
+    def _ask_launcher(self) -> None:
+        """First start: ask whether tidalamp should appear in the menu."""
+        self.push_screen(
+            ChoiceScreen(
+                _("¿AÑADIR TIDALAMP AL MENÚ DE APLICACIONES?"),
+                [
+                    ("create", _("sí, crear el acceso directo")),
+                    ("decline", _("no, y no volver a preguntar")),
+                ],
+                hint=_(" ↑↓ elegir  ↵ aplicar  esc preguntar la próxima vez"),
+            ),
+            self._launcher_answered,
+        )
+
+    def _launcher_answered(self, value: object) -> None:
+        if value == "create":
+            if desktop.create() is not None:
+                self.status = _("tidalamp ya está en el menú de aplicaciones")
+            else:
+                self.status = _("no se pudo crear el acceso directo; mira el log")
+        elif value == "decline":
+            desktop.decline()
+            self.status = _("sin acceso directo; no se volverá a preguntar")
+
+    @_quiet_after_teardown
+    def _refresh_theme(self) -> None:
+        """Follow an Omarchy theme switch without disturbing other state."""
+        palette = load_palette(name=config.PALETTE)
+        if palette.colors == self.tidalamp_palette.colors:
+            return
+        self.tidalamp_palette = palette
+        self.refresh_css(animate=False)
+        self._refresh_modes()
+        self.screen.refresh()
+
+    def _apply_audio(self) -> None:
+        """Push balance and EQ into mpv's filter chain and redraw the slider.
+
+        Also called after mpv is respawned: a fresh process starts with an
+        empty chain, so the settings would silently stop applying otherwise.
+        """
+        self.mpv.set_filter("balance", self.settings.balance_graph())
+        self.mpv.set_filter("eq", self.settings.eq_graph())
+        self.query_one("#balance", Slider).value = int(self.settings.balance * 100)
+
+    def _apply_visualizer(self) -> None:
+        """Put the shape the setting names on the analyser.
+
+        The shape only changes how the readout's analyser draws itself, not
+        where it is: all of them live beside the cover, under the track
+        details, and the wide ones simply use the rest of that column instead
+        of stopping at nineteen bars. A name that is not one of them — the
+        setting comes from a file the user edits by hand — is the classic one.
+        """
+        wanted = config.VISUALIZER if config.VISUALIZER in Analyzer.MODES else "bars"
+        self._analyzer().mode = wanted
+
+    def _analyzer(self) -> Analyzer:
+        return self.query_one("#analyzer", Analyzer)
+
+    def _start_spectrum(self) -> None:
+        """Use cava for a real FFT when it is available. Its absence is not an
+        error: the analyser falls back to the RMS meter and says so.
+
+        One process feeds every shape, at a band count none of them draws
+        directly: each resamples it. Asking cava for exactly what is on screen
+        would mean restarting it on every resize and on every change of shape,
+        and a restart is a gap in the picture.
+        """
+        try:
+            self.cava = Cava(bars=Analyzer.BANDS)
+        except SpectrumUnavailable:
+            self._feed_spectrum(None)
+            return
+        self._feed_spectrum(self.cava.frame())
+
+    def _stop_spectrum(self) -> None:
+        """Drop back to the RMS meter, for good."""
+        if self.cava is not None:
+            self.cava.close()
+            self.cava = None
+        self._feed_spectrum(None)
+
+    def _feed_spectrum(self, frame: list[float] | None) -> None:
+        self._analyzer().spectrum = frame
+
+    async def _start_mpris(self) -> None:
+        """Claim the MPRIS bus name. A desktop without a session bus is not an
+        error: we just run without the integration."""
+        try:
+            name = await self.mpris.start()
+        except Exception as exc:
+            self.status = _("MPRIS no disponible ({error})").format(error=exc)
+            return
+        self._mpris_ready = True
+        if name != "org.mpris.MediaPlayer2.tidalamp":
+            # Another tidalamp already holds the plain name.
+            self.status = _("MPRIS como {name} (ya había otra instancia)").format(
+                name=name
+            )
+
+    # ------------------------------------------------------------------- ticks
+
+    @_quiet_after_teardown
+    def _tick_fast(self) -> None:
+        # Nothing to read off an mpv being restarted or not answering; the
+        # slow tick says so on the status line.
+        if self._recovering or self.mpv.stalled:
+            return
+        playing = not self.mpv.paused and not self.mpv.idle
+        # The play/pause button follows the state, but only redraw it when the
+        # state actually turns over: this runs ten times a second. It happens
+        # behind a modal too, so closing one never shows a stale glyph.
+        if playing != self._transport_playing:
+            self._transport_playing = playing
+            self._refresh_modes()
+            self._refresh_readout()
+
+        # Nothing behind a modal is worth animating. The scrim leaves the
+        # player visible on purpose, and a translucent screen is what makes
+        # that expensive: every analyzer frame repaints the player *and*
+        # blends the whole terminal again, ten times a second. Measured on a
+        # 4K terminal with the library open, 240x62: 8.8% of a core with the
+        # backdrop still against 37.7% with it dancing behind a window nobody
+        # is looking at. cava keeps only its latest frame, so the analyzer
+        # picks up where the music is — not where it was — on the way back.
+        if len(self.screen_stack) > 1:
+            return
+
+        if self.cava is not None:
+            if self.cava.alive:
+                self._feed_spectrum(self.cava.frame())
+            else:
+                self._stop_spectrum()
+        analyzer = self._analyzer()
+        analyzer.level = self.mpv.rms()
+        analyzer.active = playing
+        analyzer.tick()
+        self.query_one(Marquee).tick()
+
+    @_quiet_after_teardown
+    def _tick_slow(self) -> None:
+        if self._recovering:
+            return
+        if not self.mpv.alive or self.mpv.stalled_for() > Mpv.STALL_LIMIT:
+            self._recover_mpv()
+            return
+        if self.mpv.stalled:
+            # Alive but not answering. Every command gives up at once while
+            # it is like this, so the screen keeps moving; a worker asks it
+            # whether it is back, and past STALL_LIMIT it is restarted.
+            self.status = _("mpv no contesta; esperando a que vuelva…")
+            self._refresh_status()
+            self._probe_mpv()
+            return
+
+        position, duration = self.mpv.position, self.mpv.duration
+        self._last_position = position
+        # The same rule as the fast tick: a player nobody is looking at does
+        # not redraw itself. Four times a second, a moving clock behind a
+        # modal costs a repaint of the player *and* a blend of the whole
+        # terminal, for a second hand under a scrim.
+        if len(self.screen_stack) == 1:
+            clock = self.query_one(TimeDisplay)
+            clock.seconds, clock.total = position, duration
+
+            seek = self.query_one(SeekBar)
+            seek.position, seek.total = position, duration
+            self.query_one("#volume", Slider).value = self.mpv.volume
+        elif isinstance(self.screen, FullscreenScreen):
+            # The full-screen view draws the same clock and bar in its own
+            # widgets; the player behind it is not looked at.
+            self.screen.follow(position, duration)
+        # The status line is the exception. A favourite added from the browser
+        # reports there, and through the scrim it is legible, so it is written
+        # even behind a modal — and it costs nothing when the words are the
+        # same, which four times a second they almost always are.
+        self._refresh_status()
+
+        # mpv went on by itself to the track queued after this one: the gap
+        # that is not there. It never goes idle in between, so it has to be
+        # looked for here.
+        if self._prepared is not None and self.mpv.playlist_pos > 0:
+            self._advance_to_prepared()
+
+        # mpv going idle after having played something means the track ended.
+        idle = self.mpv.idle
+        if idle and not self._was_idle:
+            self.action_next()
+        self._was_idle = idle
+        if not idle:
+            self._prefetch_next(position, duration)
+
+        if self._art_hidden and len(self.screen_stack) == 1:
+            self._restore_art()
+
+        if self.split and len(self.screen_stack) == 1:
+            self._follow_lyrics(position)
+
+        if self._mpris_ready:
+            self.mpris.publish()
+            self.mpris.publish_tracks()
+
+    def _refresh_status(self) -> None:
+        """Write the status line, and only when it changed: `Static.update()`
+        repaints whether or not the words moved."""
+        line = f" {self.status}"
+        # A failed save is said once in full, and the very next message (the
+        # track that starts, the repeat mode) wrote over it before anyone
+        # could read it. The mark stays for the session: nothing is being
+        # saved, and that stays true until the app is restarted.
+        if self._save_warned:
+            line += "  " + _("· sin guardar en disco")
+        if line == self._status_line:
+            return
+        self._status_line = line
+        self.query_one("#status", Static).update(line)
+
+    def _saved(self, error: OSError | None) -> None:
+        """Say that a save failed, once a session.
+
+        The queue, the settings and the library's orders are written by
+        modules that know nothing of Textual; they hand the error back and
+        this is where it is shown. Not fatal, but not silent either: with a
+        full disk the queue used to be lost without a trace.
+        """
+        if error is None or self._save_warned:
+            return
+        self._save_warned = True
+        log.warning("no se pudo guardar: %s", error)
+        self.status = _("no se pudo guardar en disco ({error})").format(error=error)
+
+    # How long to wait before trying again after a restart that failed.
+    MPV_RETRY = 5.0
+
+    def _recover_mpv(self) -> None:
+        """mpv died under us, or stopped answering for good. Respawn it
+        instead of freezing the UI on a dead socket, and put the current
+        track back where it was.
+
+        In a worker: killing the old process and waiting for the new one's
+        socket take seconds, and on the UI thread that was the whole screen
+        frozen for them. The ticks stand still until it is back.
+        """
+        if self._recovering or time.monotonic() < self._mpv_retry_at:
+            return
+        self._recovering = True
+        # The track goes back where it was, not to 0:00. The second is the
+        # last tick's: the one before the stall or the death.
+        current = self.queue.current
+        if current is not None and self._last_position > 1:
+            self._resume = (current, self._last_position)
+        # A new process starts with an empty playlist: nothing is queued.
+        self._forget_prepared()
+        self.status = _("mpv no responde; reiniciándolo…")
+        self._restart_mpv_worker()
+
+    @work(thread=True, exclusive=True, group="mpv-restart")
+    def _restart_mpv_worker(self) -> None:
+        try:
+            self.mpv.restart()
+        except Exception as exc:
+            self.call_from_thread(self._mpv_restart_failed, str(exc))
+            return
+        self.call_from_thread(self._mpv_restarted)
+
+    def _mpv_restart_failed(self, error: str) -> None:
+        self._recovering = False
+        self._mpv_retry_at = time.monotonic() + self.MPV_RETRY
+        self.status = _("mpv murió y no se pudo reiniciar ({error})").format(error=error)
+
+    def _mpv_restarted(self) -> None:
+        self._recovering = False
+        self._was_idle = True
+        self._apply_audio()
+        index = self.queue.playing
+        if 0 <= index < len(self.queue):
+            self.status = _("mpv se reinició; recargando la pista")
+            self._play_index(index)
+        else:
+            self.status = _("mpv se reinició")
+
+    def _probe_mpv(self) -> None:
+        """Ask a stalled mpv whether it is back, off the UI thread."""
+        if self._probing:
+            return
+        self._probing = True
+        self._probe_mpv_worker()
+
+    @work(thread=True, exclusive=True, group="mpv-probe")
+    def _probe_mpv_worker(self) -> None:
+        answered = self.mpv.probe()
+        self.call_from_thread(self._mpv_probed, answered)
+
+    def _mpv_probed(self, answered: bool) -> None:
+        self._probing = False
+        if answered:
+            self.status = _("mpv vuelve a contestar")
+
+    # A middle dot in the muted colour, not a full box-drawing bar: the menu
+    # is a list of small things, and a solid rule between each one shouts
+    # louder than the labels it is separating.
+    SEPARATOR = " · "
+
+    # The transport is drawn as boxed buttons three rows tall. The play/pause
+    # glyph is the action it will do: "▶" while stopped or paused, "‖" while
+    # something is playing, which is what every transport in the world does.
+    # Every state remains legible without colour and keeps a fixed width.
+    REPEAT_GLYPHS = {Repeat.NONE: "↻–", Repeat.QUEUE: "↻A", Repeat.TRACK: "↻1"}
+
+    # The same three states behind a spelled-out label. One cell each, so the
+    # word keeps its width whichever mode is on.
+    REPEAT_MARKS = {Repeat.NONE: "○", Repeat.QUEUE: "●", Repeat.TRACK: "1"}
+
+    # The same three again, for the layout that spends no Unicode at all.
+    REPEAT_MARKS_ASCII = {Repeat.NONE: "-", Repeat.QUEUE: "*", Repeat.TRACK: "1"}
+
+    # Between the transport proper and the two buttons that hold a state.
+    BUTTON_GAP = "   "
+
+    def _separated(self, text: str, body: str, dim: str, room: int = 0) -> Text:
+        """Render a `·`-joined run with the separators dimmed.
+
+        `room` drops whole entries off the tail instead of cutting through
+        one: half a word behind a separator reads as a rendering fault, while
+        a shorter list reads as a shorter list. The first entry is cropped
+        rather than dropped, so a very narrow terminal still shows something.
+        """
+        parts = text.split(self.SEPARATOR)
+        if room:
+            kept: list[str] = []
+            used = 0
+            for part in parts:
+                width = cell_len(part) + (len(self.SEPARATOR) if kept else 0)
+                if kept and used + width > room:
+                    break
+                kept.append(part)
+                used += width
+            parts = kept or [parts[0]]
+        out = Text()
+        for index, part in enumerate(parts):
+            if index:
+                out.append(self.SEPARATOR, style=dim)
+            out.append(part, style=body)
+        if room and out.cell_len > room:
+            out.truncate(room, overflow="crop")
+        return out
+
+    @staticmethod
+    def _button_key(action: str) -> str:
+        """The key on a button's face: the first one bound, as you type it.
+
+        Read from `keys_for`, not from `DEFAULT_KEYS`, so a button rebound in
+        `config.toml` shows the key that actually works — a button with the
+        wrong letter on it is worse than one with no letter at all.
+        """
+        return about.pretty_keys(keys_for(action).split(",")[0])
+
+    def _buttons(
+        self, words: bool = False, lower: bool = False, plain: bool = False
+    ) -> list[list[tuple[str, str, bool]]]:
+        """(action, label, lit) per button, in two groups.
+
+        Two groups, because they are two kinds of thing: the transport does
+        something and springs back, while shuffle and repeat stay pressed.
+
+        `words` spells the two toggles out — SHUFFLE and REPEAT, the way the
+        original does — instead of using the `⇄ ↻` glyphs. It costs about a
+        dozen columns, so a compact terminal keeps the glyphs whatever the
+        layout asks for, and the glyphs still say the state on their own.
+
+        `plain` swaps every glyph for its ASCII stand-in. Each one is padded
+        to the width of the widest in its slot (`> ` against `||`), because a
+        button that changes width shifts everything to its right when you
+        press it.
+        """
+        playing = not self.mpv.paused and not self.mpv.idle
+        key = self._button_key
+        separator = "" if self._compact else " "
+        spelled = words and not self._compact
+
+        def word(text: str) -> str:
+            return text.lower() if lower else text.upper()
+
+        if plain:
+            prev, play, stop, nxt = "<<", "||" if playing else "> ", "[]", ">>"
+            on, off = "*", "-"
+            marks = self.REPEAT_MARKS_ASCII
+        else:
+            prev = "◀" if self._compact else "◀◀"
+            play = "‖" if playing else "▶"
+            stop = "■"
+            nxt = "▶" if self._compact else "▶▶"
+            on, off = "●", "○"
+            marks = self.REPEAT_MARKS
+
+        if spelled:
+            # The trailing mark, not the colour, is what says the state: the
+            # three repeat modes have to be told apart on a mono terminal, and
+            # all four labels have to keep one width so the row never shifts.
+            shuffle = (
+                f"{key('shuffle')} {word('shuffle')} {on if self.queue.shuffle else off}"
+            )
+            repeat = f"{key('repeat')} {word('repeat')} {marks[self.queue.repeat]}"
+        elif plain:
+            shuffle = f"{key('shuffle')}{separator}SH{on if self.queue.shuffle else off}"
+            repeat = f"{key('repeat')}{separator}RP{marks[self.queue.repeat]}"
+        else:
+            shuffle = f"{key('shuffle')}{separator}{'⇄●' if self.queue.shuffle else '⇄○'}"
+            repeat = f"{key('repeat')}{separator}{self.REPEAT_GLYPHS[self.queue.repeat]}"
+        rate = speed_text(self.mpv.speed)
+        rate = (rate.replace("×", "x") if plain else rate).ljust(5)
+        modes: list[tuple[str, str, bool]] = [
+            ("shuffle", shuffle, self.queue.shuffle),
+            ("repeat", repeat, self.queue.repeat is not Repeat.NONE),
+        ]
+        # Lit off 1×, like a toggle left on, and padded to its widest,
+        # `0.25×`, so choosing a speed never shifts the row. Not in the
+        # compact player, which has no columns to spare; `b` still opens it.
+        if not self._compact:
+            modes.append(
+                ("speed", f"{key('speed')}{separator}{rate}", self.mpv.speed != 1.0)
+            )
+        return [
+            [
+                ("prev", f"{key('prev')}{separator}{prev}", False),
+                ("play", f"{key('play')}{separator}{play}", False),
+                ("stop", f"{key('stop')}{separator}{stop}", False),
+                ("next", f"{key('next')}{separator}{nxt}", False),
+            ],
+            modes,
+        ]
+
+    # Each builder fills `hits` with the (start, end, action) spans of the
+    # clickable faces on the middle row, and returns the three rows to draw.
+    # Adding a look means adding one of these and one block of TCSS; nothing
+    # else in the app asks which layout is on.
+
+    def _transport_quattro(
+        self, hits: list[tuple[int, int, str]], body: str, dim: str, lit: str
+    ) -> list[Text]:
+        """Flat: one divider between the two groups, no frames."""
+        rows = [Text("", style=body) for _row in range(3)]
+        row = rows[1]
+        row.append("  ", style=body)
+        for group_index, group in enumerate(self._buttons()):
+            if group_index:
+                row.append("  │  ", style=dim)
+            for button_index, (action, label, enabled) in enumerate(group):
+                if button_index:
+                    row.append("  ", style=body)
+                width = cell_len(label) + 2
+                hits.append((row.cell_len, row.cell_len + width, action))
+                row.append(f" {label} ", style=lit if enabled else body)
+        return rows
+
+    def _transport_retro(
+        self, hits: list[tuple[int, int, str]], body: str, dim: str, lit: str
+    ) -> list[Text]:
+        """The 1997 transport: one square button each, packed shoulder to
+        shoulder, and the two toggles spelled SHUFFLE and REPEAT.
+
+        The original's buttons are not one segmented frame; they are separate
+        square keys in a row, which is what `┐┌` between two of them says.
+        Square corners, not the rounded ones the flat layout uses.
+
+        Half blocks were tried first, to fake the raised bevel of the real
+        thing. In a terminal they are not an outline: `▀` fills its cell, so a
+        row of them came out as a solid grey slab across the panel. A drawn
+        line is the only edge a terminal actually has.
+        """
+        rows = [Text("  ", style=body) for _row in range(3)]
+        edges = ("┌─┐", "│ │", "└─┘")
+        for group_index, group in enumerate(self._buttons(words=True)):
+            if group_index:
+                for row in rows:
+                    row.append(" " if self._compact else self.BUTTON_GAP, style=body)
+            for action, label, enabled in group:
+                width = cell_len(label) + 2
+                for row, edge in zip(rows, edges, strict=True):
+                    face_row = edge[1] == " "
+                    row.append(edge[0], style=body)
+                    if face_row:
+                        hits.append((row.cell_len, row.cell_len + width, action))
+                    # Only the face lights up: an accent block on all three
+                    # rows swallowed the frame and the button stopped reading
+                    # as a button once it was switched on.
+                    row.append(
+                        f" {label} " if face_row else edge[1] * width,
+                        style=lit if (face_row and enabled) else body,
+                    )
+                    row.append(edge[2], style=body)
+        return rows
+
+    def _transport_keycaps(
+        self, hits: list[tuple[int, int, str]], body: str, dim: str, lit: str
+    ) -> list[Text]:
+        """Capped keys on one line, the way a terminal did it before boxes.
+
+        `[ z << ]` is a button because the caps say so, not because anything
+        was drawn around it, which is how a BBS or a curses program of the era
+        wrote one. The caps are the layout's: `ascii` keeps them to brackets
+        and its glyphs to ASCII, and the themed looks bring their own.
+        """
+        layout = self.layout
+        opening, closing = layout.keycaps
+        rows = [Text("", style=body) for _row in range(3)]
+        row = rows[1]
+        row.append("  ", style=body)
+        # `[ z << ]` needs eight columns for a two-glyph button; at 60 the six
+        # of them plus the menu do not fit, so the caps close up instead of
+        # the row wrapping into the one below it.
+        pad = "" if self._compact else " "
+        gap = " " if self._compact else "  "
+        buttons = self._buttons(words=True, plain=layout.ascii_only)
+        for group_index, group in enumerate(buttons):
+            if group_index:
+                row.append(gap, style=dim)
+            for action, label, enabled in group:
+                row.append(gap, style=body)
+                width = cell_len(f"{opening}{pad}{label}{pad}{closing}")
+                hits.append((row.cell_len, row.cell_len + width, action))
+                row.append(f"{opening}{pad}", style=dim)
+                row.append(label, style=lit if enabled else body)
+                row.append(f"{pad}{closing}", style=dim)
+        return rows
+
+    def _transport_nova(
+        self, hits: list[tuple[int, int, str]], body: str, dim: str, lit: str
+    ) -> list[Text]:
+        """Modern: no boxes at all. State is a colour and a rule underneath.
+
+        Nothing is drawn around a button, so the row that a frame would have
+        used carries the meaning instead: an underline in the accent under
+        whichever toggle is on. Inverted blocks would have put the loudest
+        thing on screen on the quietest control.
+        """
+        rows = [Text("", style=body) for _row in range(3)]
+        labels, marks = rows[1], rows[2]
+        labels.append("  ", style=body)
+        marks.append("  ", style=body)
+        accent = self.tidalamp_palette["accent"]
+        for group_index, group in enumerate(self._buttons(words=True, lower=True)):
+            if group_index:
+                labels.append("     ", style=body)
+                marks.append("     ", style=body)
+            for button_index, (action, label, enabled) in enumerate(group):
+                if button_index:
+                    labels.append("   ", style=body)
+                    marks.append("   ", style=body)
+                width = cell_len(label)
+                hits.append((labels.cell_len, labels.cell_len + width, action))
+                labels.append(label, style=f"bold {accent}" if enabled else body)
+                marks.append("─" * width if enabled else " " * width, style=accent)
+        return rows
+
+    def _refresh_modes(self, relayout: bool = False) -> None:
+        """Draw the transport, with shuffle and repeat lit by their state.
+
+        `relayout` re-measures the left half instead of reusing the width it
+        already had. It is off for the ticks, which redraw this several times
+        a second and must not ask for a layout pass each time; it is on when
+        the layout changes underfoot, because the three looks are different
+        widths and the buttons were being cropped to the old one.
+        """
+        palette = self.tidalamp_palette
+        ground = palette["transport_background"]
+        body = f"{palette['transport_foreground']} on {ground}"
+        dim = f"{palette['inactive']} on {ground}"
+        lit = f"bold {palette['active_foreground']} on {palette['accent']}"
+
+        hits: list[tuple[int, int, str]] = []
+        builder = getattr(self, f"_transport_{self.layout.transport}")
+        rows = builder(hits, body, dim, lit)
+        for row in rows:
+            row.append("  ", style=body)
+        self.query_one("#transport-play", Static).update(
+            Text("\n", style=body).join(rows), layout=relayout
+        )
+        self._transport_hits = hits
+
+        menu = _(
+            "? ayuda · / buscar · l lib · y letra · e eq · o config"
+            " · f/F favorito · q salir"
+        )
+        widget = self.query_one("#transport-menu", Static)
+        # Fitted here rather than left to wrap: a Rich Text wraps whatever the
+        # stylesheet says, and the overflow climbed into the rows the buttons
+        # are drawn on. `? ayuda` leads, so it is the tail that goes.
+        room = max(0, widget.size.width - 2)
+        line = self._separated(menu, body, dim, room)
+        if room:
+            line.append("  ", style=body)
+        # The menu sits on the buttons' middle row, not above them.
+        widget.update(
+            Text("\n", style=body).join(
+                [Text("", style=body), line, Text("", style=body)]
+            ),
+            layout=relayout,
+        )
+
+    @on(events.Click, "#transport-play")
+    def _transport_clicked(self, event: events.Click) -> None:
+        """Give the framed transport the mouse behaviour its shape promises."""
+        for start, end, action in self._transport_hits:
+            if start <= event.x < end:
+                getattr(self, f"action_{action}")()
+                event.stop()
+                return
+
+    @on(events.Click, "#seek")
+    def _seek_clicked(self, event: events.Click) -> None:
+        position = self.query_one("#seek", SeekBar).value_at(event.x)
+        if position is not None:
+            self.mpv.seek(position)
+        event.stop()
+
+    @on(events.Click, "#volume")
+    def _volume_clicked(self, event: events.Click) -> None:
+        slider = self.query_one("#volume", Slider)
+        self.mpv.volume = slider.value_at(event.x)
+        slider.value = self.mpv.volume
+        self.status = _("volumen: {value}").format(value=self.mpv.volume)
+        event.stop()
+
+    @on(events.Click, "#balance")
+    def _balance_clicked(self, event: events.Click) -> None:
+        slider = self.query_one("#balance", Slider)
+        self._set_balance(slider.value_at(event.x) / 100)
+        event.stop()
+
+    def _refresh_playlist_title(self) -> None:
+        widget = self.query_one("#pl-title", Static)
+        hints = (
+            _("↵ reproducir · ↑↓ navegar")
+            if self._compact
+            else _("↵ reproducir · ↑↓ navegar · d quitar · alt+↑↓ mover")
+        )
+        widget.update(self.layout.queue_heading(widget.size.width, hints))
+
+    # ------------------------------------------------------------------ queue
+
+    def _sync_queue(self) -> None:
+        """Push the queue into the playlist widget, through the filter.
+
+        The widget only ever holds the rows the filter lets through, so a row
+        on screen is no longer the same number as a position in the queue.
+        `_shown` is the map between the two, and every action that acts on a
+        track goes through it.
+        """
+        playlist = self.query_one("#playlist", RowList)
+        # Where the cursor was, in queue terms, so a queue that changed under
+        # it — or a filter that just narrowed — leaves it on the same track.
+        was = self._queue_index(playlist.cursor)
+        rows = [
+            Row(label=entry.label, detail=entry.length, entry=entry, number=position + 1)
+            for position, entry in enumerate(self.queue)
+        ]
+        self._shown = [
+            position
+            for position, row in enumerate(rows)
+            if not self._queue_filter or library.matches(self._queue_filter, row)
+        ]
+        playlist.rows = [rows[position] for position in self._shown]
+        playlist.cursor = max(0, self._row_at(was))
+        playlist.marked = self._row_at(self.queue.playing)
+        playlist.refresh()
+        self._render_queue_filter()
+        # Every edit to the queue comes through here, and any of them can
+        # change which track is next.
+        self._check_prepared()
+        self._saved(self.queue.save())
+        self._fill_years()
+        fullscreen = self._fullscreen()
+        if fullscreen is not None:
+            fullscreen.mirror_queue()
+
+    def action_track_menu(self) -> None:
+        """Open the track menu on the queue row under the cursor.
+
+        The same menu the browser opens with ↵. There it had to be asked for
+        because ↵ already queued the whole level; here ↵ plays the row, and
+        the menu is what carries everything else it can do.
+        """
+        if self._queue_hidden():
+            return
+        row = self.query_one("#playlist", RowList).current
+        if row is None or row.entry is None:
+            self.status = _("no hay ninguna pista seleccionada")
+            return
+        self.push_screen(TrackActionsScreen(row.entry.label), self._queue_menu_chosen)
+
+    def _queue_menu_chosen(self, action: str | None) -> None:
+        """Act on a queue row the way the browser acts on one of its own.
+
+        `play` is the one that differs: in the browser it queues the level and
+        starts there, and here the level *is* the queue, so it only has to
+        start. Everything else is the same call the browser's answer makes.
+        """
+        if action is None:
+            return
+        index = self._cursor_index()
+        if index < 0:
+            return
+        if action == "play":
+            self._play_index(index)
+            return
+        entry = self.queue[index]
+        if action == "artist":
+            self.choose_artist(
+                entry,
+                self.query_one("#busy", Spinner),
+                functools.partial(self._open_browser_at, entry, "artist"),
+            )
+            return
+        if action == "album":
+            self._open_browser_at(entry, "album")
+            return
+        self._browser_result((action, [entry], 0))
+
+    def _open_browser_at(self, entry: Entry, kind: str, artist_id: int = 0) -> None:
+        """The browser is not open from the queue: it opens at the library's
+        root with that level already on top, so ⌫ goes back to the root."""
+        self.push_screen(
+            BrowserScreen(
+                _("MI BIBLIOTECA"),
+                lambda: library.root(self.session),
+                goto=functools.partial(
+                    library.go_to, self.session, entry, kind, artist_id
+                ),
+                busy=(
+                    _("buscando el artista…")
+                    if kind == "artist"
+                    else _("buscando el álbum…")
+                ),
+            ),
+            self._browser_result,
+        )
+
+    def choose_artist(
+        self, entry: Entry, spinner: Spinner, then: Callable[[int], None]
+    ) -> None:
+        """Which of the track's artists «ir al artista» goes to, then ``then``.
+
+        One artist goes straight there. Several are listed to pick from: going
+        to the main one left the others out of reach. Shared by the queue and
+        the browser; ``spinner`` is whichever of the two is on screen.
+        """
+        spinner.start(_("buscando el artista…"))
+        self._artists_worker(entry, spinner, then)
+
+    @work(thread=True, exclusive=True, group="artists")
+    def _artists_worker(
+        self, entry: Entry, spinner: Spinner, then: Callable[[int], None]
+    ) -> None:
+        try:
+            artists = library.track_artists(self.session, entry)
+        except Exception as exc:
+            self.call_from_thread(self._artists_failed, spinner, exc)
+            return
+        self.call_from_thread(self._artists_found, artists, spinner, then)
+
+    def _artists_found(
+        self,
+        artists: list[tuple[int, str]],
+        spinner: Spinner,
+        then: Callable[[int], None],
+    ) -> None:
+        spinner.stop()
+        if len(artists) == 1:
+            then(artists[0][0])
+            return
+        self.push_screen(
+            ChoiceScreen(_("¿QUÉ ARTISTA?"), artists, artists[0][0]),
+            lambda ident: then(cast(int, ident)) if ident else None,
+        )
+
+    def _artists_failed(self, spinner: Spinner, exc: Exception) -> None:
+        spinner.stop()
+        self.status = _("no se pudo abrir: {error}").format(error=exc)
+
+    def _playlist_chosen(self, key: str | None) -> None:
+        entries, self._pending_playlist = self._pending_playlist, []
+        if key is None or not entries:
+            return
+        # The row's cache key is `playlist:<id>`; the write wants the id.
+        self.query_one("#busy", Spinner).start(_("añadiendo a la playlist…"))
+        self._add_to_playlist_worker(key.split(":", 1)[-1], entries)
+
+    @work(thread=True, exclusive=True, group="playlist-add")
+    def _add_to_playlist_worker(self, playlist_id: str, entries: list[Entry]) -> None:
+        try:
+            ensure_fresh(self.session)
+            added = library.add_to_playlist(self.session, playlist_id, entries)
+        except library.PlaylistSaveFailed as exc:
+            self.call_from_thread(
+                self._playlist_added,
+                _("«{title}»: entraron {added} de {total}").format(
+                    title=exc.title, added=exc.added, total=exc.total
+                ),
+            )
+            return
+        except Exception as exc:
+            self.call_from_thread(
+                self._playlist_added, _("error: {error}").format(error=exc)
+            )
+            return
+        self.call_from_thread(
+            self._playlist_added,
+            _("{count} pistas añadidas a la playlist").format(count=added),
+        )
+
+    def _playlist_added(self, message: str) -> None:
+        self.query_one("#busy", Spinner).stop()
+        self.status = message
+
+    def _fill_years(self) -> None:
+        """Ask TIDAL for the years the queue is missing, out of the way.
+
+        The year is the one column a track listing does not carry, so it costs
+        a request per album. That happens here rather than while the level
+        loads: the rows go up straight away and the years arrive a moment
+        later, instead of every level taking a second per record it holds.
+
+        Nobody pays for a column they turned off.
+        """
+        if "year" not in config.COLUMNS:
+            return
+        wanted = {
+            entry.album_id
+            for entry in self.queue
+            if entry.year == 0 and entry.album_id > 0
+        }
+        if wanted:
+            self._years_worker(sorted(wanted))
+
+    @work(thread=True, exclusive=True, group="years")
+    def _years_worker(self, album_ids: list[int]) -> None:
+        found = {album: library.album_year(self.session, album) for album in album_ids}
+        if any(found.values()):
+            self.call_from_thread(self._years_ready, found)
+
+    def _years_ready(self, found: dict[int, int]) -> None:
+        """Write what came back onto the queue and redraw it.
+
+        Straight onto the entries rather than through a setter: the year is a
+        detail of the record, not a change to the queue, and nothing about the
+        order or the playing track has moved.
+        """
+        for entry in self.queue:
+            if entry.year == 0:
+                entry.year = found.get(entry.album_id, 0)
+        self._saved(self.queue.save())
+        self.query_one("#playlist", RowList).refresh()
+        self._refresh_track_meta()
+
+    # ---------------------------------------------------------- queue filter
+
+    def _queue_index(self, cursor: int) -> int:
+        """Which track in the queue the row at ``cursor`` is. -1 when none."""
+        if 0 <= cursor < len(self._shown):
+            return self._shown[cursor]
+        return -1
+
+    def _cursor_index(self) -> int:
+        """The queue position under the cursor. -1 when the queue is empty."""
+        return self._queue_index(self.query_one("#playlist", RowList).cursor)
+
+    def _row_at(self, position: int) -> int:
+        """Where queue position ``position`` sits on screen.
+
+        -1 when the filter is hiding it, which is a real answer: the track
+        playing right now may well not be one of the ones being searched for.
+        """
+        try:
+            return self._shown.index(position)
+        except ValueError:
+            return -1
+
+    def _render_queue_filter(self) -> None:
+        """The count next to the search box: how much of the queue is left."""
+        if not self.query("#queue-filter-bar"):
+            return
+        if not self.query_one("#queue-filter-bar", Horizontal).display:
+            return
+        self.query_one("#queue-filter-count", Static).update(
+            _("{shown} de {total}").format(shown=len(self._shown), total=len(self.queue))
+            if self._queue_filter
+            else _("{total} en la cola").format(total=len(self.queue))
+        )
+
+    def action_filter_queue(self) -> None:
+        """Open the search bar under the queue and start typing into it."""
+        if isinstance(self.screen, FullscreenScreen):
+            # The bar lives under the player's queue, behind this view.
+            self.status = _("la búsqueda de la cola está en el reproductor")
+            return
+        self.query_one("#queue-filter-bar", Horizontal).display = True
+        self._render_queue_filter()
+        self.query_one("#queue-filter", Input).focus()
+
+    def _clear_queue_filter(self) -> None:
+        """Drop the filter and close its bar, leaving the cursor on the track
+        it was on: narrowing the queue is how you reach a track in it."""
+        self._queue_filter = ""
+        self.query_one("#queue-filter", Input).value = ""
+        self.query_one("#queue-filter-bar", Horizontal).display = False
+        self.set_focus(None)
+        self._sync_queue()
+
+    def action_close_queue_filter(self) -> None:
+        """esc undoes the last thing that happened, and nothing else."""
+        if self.query_one("#queue-filter-bar", Horizontal).display:
+            self._clear_queue_filter()
+
+    def action_to_playing(self) -> None:
+        """Put the queue cursor back on the track that is playing."""
+        if isinstance(self.screen, FullscreenScreen):
+            # In the full-screen view, `g` is a way to the queue: it opens.
+            self.screen.open_queue()
+        if self.queue.playing < 0:
+            self.status = _("no hay una pista reproduciéndose")
+            return
+        row = self._row_at(self.queue.playing)
+        if row < 0:
+            self._clear_queue_filter()
+            row = self._row_at(self.queue.playing)
+        if row < 0:
+            return
+        playlist = self.query_one("#playlist", RowList)
+        playlist.cursor = row
+        playlist.marked = row
+        playlist.refresh()
+
+    @on(Input.Changed, "#queue-filter")
+    def _queue_filter_changed(self, event: Input.Changed) -> None:
+        value = event.value.strip()
+        if value == self._queue_filter:
+            return
+        self._queue_filter = value
+        self._sync_queue()
+
+    @on(Input.Submitted, "#queue-filter")
+    def _queue_filter_submitted(self, event: Input.Submitted) -> None:
+        """↵ hands the keys back to the queue and leaves the filter applied."""
+        self.query_one("#queue-filter", Input).blur()
+        self.set_focus(None)
+
+    # ------------------------------------------------------------------ search
+
+    def action_search(self) -> None:
+        self.push_screen(SearchScreen(), self._run_search)
+
+    def _run_search(self, query: str | None) -> None:
+        if not query:
+            return
+        self.push_screen(
+            BrowserScreen(
+                _("BUSCAR: {query}").format(query=query),
+                lambda: library.search_rows(self.session, query),
+                search=True,
+            ),
+            self._browser_result,
+        )
+
+    def action_save_playlist(self) -> None:
+        if not len(self.queue):
+            self.status = _("la cola está vacía; no hay nada que guardar")
+            return
+        self.push_screen(PlaylistNameScreen(), self._save_playlist_named)
+
+    def _save_playlist_named(self, result: str | None) -> None:
+        title = (result or "").strip()
+        if not title:
+            return
+        # The queue may keep changing while the network worker runs. Save the
+        # exact list that was named, not whichever list happens to exist later.
+        entries = list(self.queue)
+        if not entries:
+            self.status = _("la cola está vacía; no hay nada que guardar")
+            return
+        self.query_one("#busy", Spinner).start(
+            _("guardando la cola como «{title}»…").format(title=title)
+        )
+        self._save_playlist_worker(title, entries)
+
+    @work(thread=True, exclusive=True, group="save-playlist")
+    def _save_playlist_worker(self, title: str, entries: list[Entry]) -> None:
+        try:
+            ensure_fresh(self.session)
+            added = library.save_queue_playlist(self.session, title, entries)
+        except library.PlaylistSaveFailed as exc:
+            message = _(
+                "playlist «{title}» creada con {added} de {total} pistas: {error}"
+            ).format(
+                title=exc.title,
+                added=exc.added,
+                total=exc.total,
+                error=exc,
+            )
+        except Exception as exc:
+            message = _("no se pudo guardar la cola: {error}").format(error=exc)
+        else:
+            message = _("playlist «{title}» creada con {count} pistas").format(
+                title=title, count=added
+            )
+        self.call_from_thread(self._save_playlist_done, message)
+
+    def _save_playlist_done(self, message: str) -> None:
+        self.query_one("#busy", Spinner).stop()
+        self.status = message
+
+    def action_library(self) -> None:
+        self.push_screen(
+            BrowserScreen(_("MI BIBLIOTECA"), lambda: library.root(self.session)),
+            self._browser_result,
+        )
+
+    def _browser_result(self, result: tuple | None) -> None:
+        if result is None:
+            return
+        action, entries, index = result
+        if not entries:
+            self.status = _("nada que añadir")
+            return
+        if action == "play":
+            self.queue.replace(entries, start=-1)
+            self._sync_queue()
+            self._play_index(index)
+        elif action == "next":
+            self.queue.insert_next(entries)
+            self._sync_queue()
+            self.status = (
+                _("«{label}» sonará a continuación").format(label=entries[0].label)
+                if len(entries) == 1
+                else _("{count} pistas sonarán a continuación").format(count=len(entries))
+            )
+        elif action == "playlist":
+            self._pending_playlist = list(entries)
+            self.push_screen(PlaylistPickerScreen(self.session), self._playlist_chosen)
+        elif action == "radio":
+            self.query_one("#busy", Spinner).start(
+                _("buscando la radio de «{label}»…").format(label=entries[0].label)
+            )
+            self._radio_worker(entries[0])
+        elif action == "favourite":
+            self._favourite_entry(entries[0])
+        else:
+            added = self.queue.append(entries)
+            self._sync_queue()
+            self.status = _("{count} pistas añadidas a la cola").format(count=added)
+
+    # Its own group, like the other two: an exclusive worker cancels its
+    # group, and the resolve worker feeding playback is not this one's to kill.
+    @work(thread=True, exclusive=True, group="radio")
+    def _radio_worker(self, entry: Entry) -> None:
+        try:
+            entries = library.track_radio(self.session, entry)
+        except Exception as exc:
+            self.call_from_thread(self._radio_failed, str(exc))
+            return
+        self.call_from_thread(self._radio_ready, entry, entries)
+
+    def _radio_failed(self, message: str) -> None:
+        self.query_one("#busy", Spinner).stop()
+        self.status = message
+
+    def _radio_ready(self, entry: Entry, entries: list[Entry]) -> None:
+        self.query_one("#busy", Spinner).stop()
+        # The seed goes first: a station that opens on a different song looks
+        # like the wrong thing started.
+        self.queue.replace([entry, *entries], start=-1)
+        self._sync_queue()
+        self._play_index(0)
+        self.status = _("radio de «{label}»: {count} pistas").format(
+            label=entry.label, count=len(entries) + 1
+        )
+
+    # --------------------------------------------------------------- transport
+
+    def action_cursor_up(self) -> None:
+        self.query_one("#playlist", RowList).move(-1)
+
+    def action_cursor_down(self) -> None:
+        self.query_one("#playlist", RowList).move(1)
+
+    def action_cursor_page_up(self) -> None:
+        self.query_one("#playlist", RowList).move(-10)
+
+    def action_cursor_page_down(self) -> None:
+        self.query_one("#playlist", RowList).move(10)
+
+    def action_play_selected(self) -> None:
+        if len(self.queue):
+            self._play_index(self._cursor_index())
+
+    def action_play(self) -> None:
+        """Play, resume or pause: whichever the current state calls for.
+
+        One button, one key, one action. There is no second shortcut that
+        pauses: two keys for the same job is the clutter merging the buttons
+        was meant to remove.
+        """
+        if self.queue.current is not None and not self.mpv.idle:
+            self.mpv.toggle_pause()
+            self.status = _("pausa") if self.mpv.paused else _("reproduciendo")
+            self._refresh_readout()
+        elif len(self.queue):
+            self._play_index(self._cursor_index())
+
+    def _toggle_pause(self) -> None:
+        """A plain toggle, with no key of its own: MPRIS `PlayPause` uses it.
+
+        Not an `action_`, because nothing on the keyboard reaches it and a
+        bindable name that cannot be bound is a lie in the config file.
+        """
+        self.mpv.toggle_pause()
+        self.status = _("pausa") if self.mpv.paused else _("reproduciendo")
+
+    def action_stop(self) -> None:
+        self._autoplaying = False
+        if self._resolving is not None and self._resolving is not _STOPPED:
+            # A resolve on its way: its spinner goes, and so does its track
+            # when it comes back.
+            self.query_one("#busy", Spinner).stop()
+        self._resolving = _STOPPED
+        # `stop` empties mpv's playlist, the track queued after this one too.
+        self._forget_prepared()
+        self._resume = None
+        self.mpv.stop()
+        self.queue.playing = -1
+        # The tick reads "mpv went idle" as "the track ended" and moves on.
+        # Stopping makes mpv idle on purpose, so say so first, or the next
+        # tick restarts the queue from the top — which is what «v» did.
+        self._was_idle = True
+        self._sync_queue()
+        self.query_one(Marquee).text = ""
+        self._playable = None
+        self._refresh_readout()
+        self.status = _("detenido")
+
+    def action_next(self) -> None:
+        index = self.queue.next_index()
+        if index is None:
+            if config.AUTOPLAY and self._autoplay():
+                return
+            self.action_stop()
+        else:
+            self._play_index(index)
+
+    def _autoplay(self) -> bool:
+        """Ask TIDAL for the last track's radio to carry on with. False when
+        there is nothing to carry on from, and the queue stops as it would."""
+        if self._autoplaying:
+            return True
+        seed = self.queue.current
+        if seed is None and len(self.queue):
+            seed = list(self.queue)[-1]
+        if seed is None:
+            return False
+        self._autoplaying = True
+        self.status = _("buscando la radio de «{label}»…").format(label=seed.label)
+        self._autoplay_worker(seed)
+        return True
+
+    @work(thread=True, exclusive=True, group="autoplay")
+    def _autoplay_worker(self, seed: Entry) -> None:
+        try:
+            entries = library.track_radio(self.session, seed)
+        except Exception as exc:
+            self.call_from_thread(self._autoplay_failed, str(exc))
+            return
+        self.call_from_thread(self._autoplay_ready, seed, entries)
+
+    def _autoplay_ready(self, seed: Entry, entries: list[Entry]) -> None:
+        """Add the station to the end, not over the queue.
+
+        Unlike the track menu's radio, which replaces the queue and starts on
+        its seed: the seed is what just finished, and the queue is still the
+        user's. Tracks already in it are left out, so the station does not
+        loop back over what was just heard.
+        """
+        # Stopped, or something else started, while the radio was on its way:
+        # the user decided, and a late station must not override them.
+        if not self._autoplaying:
+            return
+        self._autoplaying = False
+        have = {entry.id for entry in self.queue}
+        fresh = [entry for entry in entries if entry.id not in have]
+        if not fresh:
+            self.action_stop()
+            self.status = _("reproducción automática: no hay más para «{label}»").format(
+                label=seed.label
+            )
+            return
+        start = len(self.queue)
+        self.queue.append(fresh)
+        self._sync_queue()
+        self._play_index(start)
+        self.status = _("reproducción automática: radio de «{label}»").format(
+            label=seed.label
+        )
+
+    def _autoplay_failed(self, message: str) -> None:
+        if not self._autoplaying:
+            return
+        self._autoplaying = False
+        self.action_stop()
+        self.status = _("reproducción automática: {error}").format(error=message)
+
+    def action_prev(self) -> None:
+        index = self.queue.prev_index()
+        if index is not None:
+            self._play_index(index)
+
+    def action_remove(self) -> None:
+        if self._queue_hidden():
+            return
+        index = self._cursor_index()
+        if index >= 0:
+            self.queue.remove(index)
+            self._sync_queue()
+            self.status = _("pista quitada de la cola")
+
+    def _move_entry(self, delta: int) -> None:
+        """Move the track under the cursor one place along the queue.
+
+        Under a filter the rows on screen may not visibly reorder — the track
+        it swapped with can be one the filter is hiding — but the number at
+        the head of the line is the queue position, and that does change.
+        """
+        if self._queue_hidden():
+            return
+        index = self._cursor_index()
+        if index < 0:
+            return
+        moved = self.queue.move(index, delta)
+        if moved == index:
+            return
+        self._sync_queue()
+        playlist = self.query_one("#playlist", RowList)
+        playlist.cursor = max(0, self._row_at(moved))
+        playlist.refresh()
+
+    def action_move_up(self) -> None:
+        self._move_entry(-1)
+
+    def action_move_down(self) -> None:
+        self._move_entry(1)
+
+    def action_clear(self) -> None:
+        # One key away from `c`, which stops. A slipped shift used to be the
+        # end of a queue that took half an hour to build, and since a queue
+        # can be saved to TIDAL it is worth more than it was.
+        cursor = self._cursor_index()
+        self._cleared = (list(self.queue), max(0, cursor)) if len(self.queue) else None
+        self.action_stop()
+        self.queue.clear()
+        self._sync_queue()
+        self._art_url = ""
+        self._pending_art = None
+        widget = self._artwork()
+        if widget is not None:
+            widget.show(None)
+        self.status = _("cola vaciada")
+
+    def action_undo_clear(self) -> None:
+        """Put back what `C` threw away, once.
+
+        It does not start playing again. Clearing stopped the music, and
+        undoing gives back the list, not the sound: a song starting on its own
+        because someone undid a mistake is a worse surprise than the mistake.
+        """
+        if self._cleared is None:
+            self.status = _("no hay ningún vaciado que deshacer")
+            return
+        entries, cursor = self._cleared
+        # One level. A second would be a history nobody asked for, and this
+        # exists for the slip of two seconds ago.
+        self._cleared = None
+        self.queue.replace(entries, start=-1)
+        self._sync_queue()
+        playlist = self.query_one("#playlist", RowList)
+        playlist.cursor = max(0, self._row_at(cursor))
+        playlist.refresh()
+        self.status = _("cola restaurada ({count} pistas)").format(count=len(entries))
+
+    def action_shuffle(self) -> None:
+        self.queue.shuffle = not self.queue.shuffle
+        self._saved(self.queue.save())
+        self._check_prepared()
+        self._refresh_modes()
+        self.status = (
+            _("shuffle activado") if self.queue.shuffle else _("shuffle desactivado")
+        )
+
+    def action_repeat(self) -> None:
+        self.queue.repeat = self.queue.repeat.next()
+        self._saved(self.queue.save())
+        self._check_prepared()
+        self._refresh_modes()
+        names = {
+            Repeat.NONE: _("sin repetición"),
+            Repeat.QUEUE: _("repetir cola"),
+            Repeat.TRACK: _("repetir pista"),
+        }
+        self.status = names[self.queue.repeat]
+
+    def _play_index(self, index: int) -> None:
+        self._autoplaying = False
+        if not 0 <= index < len(self.queue):
+            return
+        # Whatever was resolved ahead was for the track after the old one,
+        # and the old one goes on playing until this resolves: were it to end
+        # meanwhile, mpv would go on to the queued track, not to this.
+        self._drop_prepared()
+        entry = self._announce(index)
+        # The spinner carries the message while we wait; repeating it in the
+        # status text next to it would just say the same thing twice.
+        self.status = ""
+        self.query_one("#busy", Spinner).start(
+            _("resolviendo «{title}»…").format(title=entry.title)
+        )
+        self._resolving = entry
+        self._resolve_worker(entry)
+
+    def _announce(self, index: int) -> Entry:
+        """Show ``index`` as the track playing: the queue's marker and cursor,
+        the title, the details and the cover. Not the sound: either a resolve
+        brings it, or mpv already went on to it by itself."""
+        entry = self.queue[index]
+        self.queue.playing = index
+        self._prefetch_failed = None
+        playlist = self.query_one("#playlist", RowList)
+        row = self._row_at(index)
+        # A track started from outside the filter — «next», the radio, MPRIS —
+        # can be one the filter hides. The cursor stays where the user left it
+        # rather than jumping to an unrelated row.
+        if row >= 0:
+            playlist.cursor = row
+        playlist.marked = row
+        playlist.refresh()
+        self.query_one(Marquee).text = f"{index + 1}. {entry.title}"
+        self._refresh_track_meta()
+        self._saved(self.queue.save())
+        self._load_art(entry)
+        return entry
+
+    # ----------------------------------------------------- the next, ahead
+
+    # How long before the end the next track is resolved. The URL TIDAL hands
+    # out expires, so not as soon as a track starts; twenty seconds is room
+    # for a slow answer and a retry, and for mpv to open it ahead.
+    PREFETCH_LEAD = 20.0
+    # How long a resolved track may wait, queued, before it is resolved
+    # again: a track paused near its end would otherwise go on to a URL that
+    # expired while nobody listened.
+    PREPARED_TTL = 300.0
+
+    def _next_entry(self) -> Entry | None:
+        index = self.queue.next_index()
+        return None if index is None else self.queue[index]
+
+    def _prefetch_next(self, position: float, duration: float) -> None:
+        """Resolve the next track while this one plays, and queue it in mpv.
+
+        Without it, the next track was only asked of TIDAL once this one had
+        ended, and the silence between the two songs was that request: on a
+        live album or a concept record, a gap where the record has none.
+        """
+        if (
+            self._prefetching is not None
+            or self._resolving is not None
+            or self.queue.playing < 0
+            or duration <= 0
+            or duration - position > self.PREFETCH_LEAD
+        ):
+            return
+        entry = self._next_entry()
+        if entry is None or entry is self._prefetch_failed:
+            return
+        prepared = self._prepared
+        if prepared is not None:
+            if (
+                prepared.entry is entry
+                and time.monotonic() - prepared.at < self.PREPARED_TTL
+            ):
+                return
+            self._drop_prepared()
+        self._prefetching = entry
+        # The lyrics only when something on screen follows the playing track
+        # with them: otherwise it is a request per track nobody reads.
+        lyrics = self.split or any(
+            isinstance(screen, LyricsScreen) for screen in self.screen_stack
+        )
+        self._prefetch_worker(entry, lyrics)
+
+    @work(thread=True, exclusive=True, group="prefetch")
+    def _prefetch_worker(self, entry: Entry, lyrics: bool = False) -> None:
+        try:
+            ensure_fresh(self.session)
+            track = with_retries(lambda: entry.resolve(self.session))
+            playable = resolve(track)
+        except Exception:
+            # Quietly: the track after this one is not what the user is
+            # listening to. When its turn comes it is resolved as ever, and
+            # a failure then says why.
+            self.call_from_thread(self._prefetch_gave_up, entry)
+            return
+        self.call_from_thread(self._prefetched, entry, playable)
+        self._warm(entry, track, lyrics)
+
+    def _warm(self, entry: Entry, track: object, lyrics: bool) -> None:
+        """Fetch the next track's cover, and its lyrics if asked, into their
+        caches. The sound starts with no gap, and without this the cover and
+        the lyrics then came in a moment after it, off the network.
+
+        After the audio is queued, never before: this is decoration. Only the
+        download is done ahead; drawing depends on the box and the look at
+        the time, and from the disk cache it is quick. Failures are silent,
+        and the track's own turn fetches again and says why.
+        """
+        if entry.art_url and self.art_protocol is not artwork.Protocol.NONE:
+            with contextlib.suppress(Exception):
+                artwork.fetch(entry.art_url)
+        if lyrics and entry.id not in self._lyrics_cache:
+            with contextlib.suppress(Exception):
+                self._lyrics_cache[entry.id] = load_lyrics(track)
+
+    def _prefetched(self, entry: Entry, playable: Playable) -> None:
+        """Queue what came back, if it is still the track that comes next.
+
+        The same care as `_resolving`: a result for a track the queue no
+        longer puts next (shuffle, repeat or an edit moved it meanwhile)
+        must not play.
+        """
+        if entry is not self._prefetching:
+            return
+        self._prefetching = None
+        if (
+            self.queue.playing < 0
+            or self._resolving is not None
+            or self._next_entry() is not entry
+        ):
+            return
+        self.mpv.append(playable.url, self._gain_for(playable))
+        self._prepared = _Prepared(entry, playable, time.monotonic())
+
+    def _prefetch_gave_up(self, entry: Entry) -> None:
+        if entry is self._prefetching:
+            self._prefetching = None
+            self._prefetch_failed = entry
+
+    def _advance_to_prepared(self) -> None:
+        """mpv went on to the track `_prefetched` queued: follow it."""
+        prepared = self._prepared
+        assert prepared is not None
+        self._prepared = None
+        # Keep only what plays now, back at position 0, so that the next one
+        # queued is position 1 again.
+        self.mpv.drop_queued()
+        index = self.queue.next_index()
+        if index is None or self.queue[index] is not prepared.entry:
+            # Every change to the queue checks what is prepared, so this is
+            # not expected; if it happens, the queue is what gets played.
+            if index is None:
+                self.action_stop()
+            else:
+                self._play_index(index)
+            return
+        self._announce(index)
+        self._now_playing(prepared.entry, prepared.playable)
+
+    def _forget_prepared(self) -> None:
+        """Forget the track resolved ahead, and one on its way, without
+        telling mpv: for callers whose next command to it empties its
+        playlist anyway (`load`, `stop`, a restart)."""
+        self._prefetching = None
+        self._prepared = None
+
+    def _drop_prepared(self) -> None:
+        """Forget the track resolved ahead, and take it out of mpv's playlist."""
+        queued = self._prepared is not None
+        self._forget_prepared()
+        if queued:
+            self.mpv.drop_queued()
+
+    def _check_prepared(self) -> None:
+        """After the queue changed: keep what was prepared only if it is
+        still the track that comes next."""
+        wanted = self._next_entry() if self.queue.playing >= 0 else None
+        self._prefetch_failed = None
+        if self._prefetching is not None and self._prefetching is not wanted:
+            # Its result is dropped when it lands.
+            self._prefetching = None
+        if self._prepared is not None and self._prepared.entry is not wanted:
+            self._drop_prepared()
+
+    def _gain_badge(self, playable: Playable) -> str:
+        """The gain on the badge line while the volume is normalised.
+
+        The gain applied, peak cap included, since that is what is heard. A
+        track TIDAL sent no gain for says so instead of «0 dB», which would
+        read as measured and found neutral. Nothing at all when off.
+        """
+        if config.REPLAYGAIN not in ("track", "album"):
+            return ""
+        sent = any(
+            getattr(playable, name, None) is not None
+            for name in ("track_gain", "album_gain")
+        )
+        if not sent:
+            return " · RG —"
+        return f" · RG {self._gain_for(playable):+.1f} dB"
+
+    def _gain_for(self, playable: Playable | None) -> float:
+        """The ReplayGain to play ``playable`` at, for the mode chosen."""
+        if playable is None:
+            return 0.0
+        return replaygain(
+            config.REPLAYGAIN,
+            (
+                getattr(playable, "track_gain", None),
+                getattr(playable, "track_peak", None),
+            ),
+            (
+                getattr(playable, "album_gain", None),
+                getattr(playable, "album_peak", None),
+            ),
+        )
+
+    # ----------------------------------------------------------------- artwork
+
+    def _load_art(self, entry: Entry) -> None:
+        """Ask for this entry's cover, unless we are already showing it."""
+        if self.art_protocol is artwork.Protocol.NONE:
+            return
+        widget = self._artwork()
+        if widget is None:
+            return
+        if not entry.art_url:
+            self._art_url = ""
+            widget.show(None)
+            return
+        if entry.art_url == self._art_url:
+            return
+        self._art_url = entry.art_url
+        if self._compact:
+            widget.show(None)
+            return
+        self._art_worker(entry.art_url)
+
+    # Its own group: the default one is the resolve worker's, and an exclusive
+    # worker cancels the rest of its group — the cover would kill playback.
+    @work(thread=True, exclusive=True, group="artwork")
+    def _art_worker(self, url: str) -> None:
+        widget = self.query_one(Artwork)
+        look = self._cover_look()
+        try:
+            data = artwork.fetch(url)
+            cover = artwork.render(
+                data,
+                widget.cols,
+                widget.rows,
+                self.art_protocol,
+                image_id=widget.image_id,
+                outline=look[0],
+                ground=look[1],
+            )
+        except Exception as exc:
+            # A missing cover is decoration; it never touches the audio path.
+            self.call_from_thread(
+                setattr, self, "status", _("sin carátula: {error}").format(error=exc)
+            )
+            cover = None
+        if url == self._art_url:
+            self._art_look = look
+            # None too: a cover that could not be had takes the last one
+            # down, rather than leaving another record's cover over this one.
+            self.call_from_thread(self._art_ready, cover)
+
+    def _reload_art(self) -> None:
+        """Draw the cover again with the protocol that is now configured.
+
+        It used to take a restart, which was tolerable while the cover was a
+        detail of the display. It stopped being tolerable when transparency
+        began moving this setting on the user's behalf: they turned on «let
+        the player show through the window» and the hole where the cover had
+        been stayed there until they restarted the very thing they were
+        configuring.
+        """
+        self.art_protocol = artwork.detect_protocol(configured=config.ARTWORK)
+        widget = self._artwork()
+        if widget is None:
+            return
+        # Down first, and through `show(None)`: a kitty cover is a picture the
+        # terminal is holding on our behalf, and it outlives the cells it was
+        # drawn over until something deletes it. That is what `show(None)`
+        # sends. Then the caches go, so the reload is not mistaken for the
+        # cover that is already up.
+        self._art_hidden = False
+        self._pending_art = None
+        widget.show(None)
+        self._art_url = ""
+        entry = self.queue.current
+        if entry is not None:
+            self._load_art(entry)
+        # The full-screen view keeps a cover of its own, in the old protocol.
+        fullscreen = self._fullscreen()
+        if fullscreen is not None:
+            fullscreen.reload_cover()
+
+    def _art_ready(self, cover: artwork.Cover | None) -> None:
+        """Put a freshly rendered cover up — and take it straight back down if
+        there is a window in front of it.
+
+        A cover that lands while a modal is open used to be painted over that
+        modal, because a pixel protocol draws above the text no matter when it
+        arrived. It happens on any track change made from the browser, not
+        only when the protocol is switched. Half blocks are text and stay.
+        """
+        widget = self._artwork()
+        if widget is None:
+            return
+        # Not shown and then hidden: kept for when the window closes. It used
+        # to go up and then through `_hide_art`, which returns early when a
+        # cover is already hidden, and one always is once a window has opened
+        # over a pixel cover. So a cover arriving behind the window (a track
+        # changed from the browser, or a theme changed in the settings, which
+        # re-measures the box and fetches the cover again) stayed up, painted
+        # over the window.
+        if (
+            cover is not None
+            and len(self.screen_stack) > 1
+            and cover.protocol is not artwork.Protocol.BLOCKS
+        ):
+            self._art_hidden = True
+            self._pending_art = cover
+            return
+        # Up now, so whatever a window hid before is stale. Left set, the next
+        # tick saw a hidden cover with no window in front and put it back,
+        # over this one: pick another record in the browser, its cover lands
+        # from the cache as the browser closes, and the last record's comes
+        # back a quarter of a second later (seen on 2026-09-14).
+        self._art_hidden = False
+        self._pending_art = None
+        widget.show(cover)
+
+    def _artwork(self) -> Artwork | None:
+        """The cover widget, or ``None`` before ``compose`` has produced it.
+
+        Textual pushes the default screen on the way up, which reaches
+        ``push_screen`` below while there is still nothing to query.
+        """
+        try:
+            return self.query_one(Artwork)
+        except Exception:
+            return None
+
+    def _hide_art(self) -> None:
+        """Take the cover down while another screen is in front.
+
+        kitty and sixel images live above the text: the terminal paints them
+        over the cells, so a modal would open *underneath* the cover instead
+        of over it. Half blocks are ordinary characters and stack like any
+        other text, so those stay — which is what the scrim behind a modal is
+        for, and a cover that blinked out on `l` was the one hole in it.
+        """
+        widget = self._artwork()
+        if self._art_hidden or widget is None or widget.cover is None:
+            return
+        if widget.cover.protocol is artwork.Protocol.BLOCKS:
+            return
+        self._art_hidden = True
+        self._pending_art = widget.cover
+        widget.show(None)
+
+    def _restore_art(self) -> None:
+        widget = self._artwork()
+        if not self._art_hidden or widget is None:
+            return
+        self._art_hidden = False
+        if self._compact:
+            return
+        widget.show(self._pending_art)
+
+    def push_screen(self, screen, callback=None, wait_for_dismiss=False, *, mode=None):
+        self._hide_art()
+        # The `transparency` setting travels as a class rather than as two
+        # copies of the stylesheet: the CSS says what transparent looks like,
+        # this says whether this window is.
+        screen.set_class(self._see_through(below=self.screen), "transparent")
+        return super().push_screen(screen, callback, wait_for_dismiss, mode=mode)
+
+    @staticmethod
+    def _see_through(below) -> bool:
+        """Whether a window opened over ``below`` lets it show through.
+
+        Never over the full-screen view. What lies under a window there is a
+        cover as large as the terminal, and every change inside the window
+        sends its rows again with that cover blended in at the sides. Measured
+        in a pty at 480x130 with the cover in blocks: opening the help cost
+        0.86 MB and twenty lines of scroll 1.21 MB with the window see-through,
+        0.22 and 0.35 without. The player behind the other windows keeps it.
+        """
+        return config.TRANSPARENCY and not isinstance(below, FullscreenScreen)
+
+    @work(thread=True, exclusive=True)
+    def _resolve_worker(self, entry: Entry) -> None:
+        try:
+            # An access token only lasts a few hours, less than a listening
+            # session; refresh it here rather than letting the next call fail.
+            if ensure_fresh(self.session):
+                self.call_from_thread(setattr, self, "status", _("sesión refrescada"))
+            # A restored entry has no Track yet; this is where we pay for it.
+            track = with_retries(lambda: entry.resolve(self.session))
+            playable = resolve(track)
+        except NotLoggedIn as exc:
+            self.call_from_thread(self._resolve_failed, str(exc), entry)
+            return
+        except StreamUnavailable as exc:
+            self.call_from_thread(self._resolve_failed, str(exc), entry)
+            return
+        except Exception as exc:
+            self.call_from_thread(
+                self._resolve_failed, _("error: {error}").format(error=exc), entry
+            )
+            return
+        self.call_from_thread(self._start, entry, playable)
+
+    def _stale(self, entry: Entry | None) -> bool:
+        """Whether a resolve that just came back is for a track no longer wanted."""
+        return (
+            entry is not None
+            and self._resolving is not None
+            and entry is not self._resolving
+        )
+
+    def _resolve_failed(self, message: str, entry: Entry | None = None) -> None:
+        if self._stale(entry):
+            return
+        self._resolving = None
+        self.query_one("#busy", Spinner).stop()
+        self.status = message
+
+    def _start(self, entry: Entry, playable: Playable) -> None:
+        if self._stale(entry):
+            # «Next» was pressed again while this one resolved; the spinner
+            # belongs to the newer resolve, still on its way. Or stop was.
+            return
+        self._resolving = None
+        self.query_one("#busy", Spinner).stop()
+        # Only the reload after a restart starts part way in, and only for the
+        # track it was taken for: «next» meanwhile starts the next at 0:00.
+        resume, self._resume = self._resume, None
+        start = resume[1] if resume is not None and resume[0] is entry else 0.0
+        self.mpv.load(playable.url, self._gain_for(playable), start=start)
+        self._was_idle = False
+        self._now_playing(entry, playable)
+
+    def _now_playing(self, entry: Entry, playable: Playable) -> None:
+        """What changes once a track sounds, whether a resolve started it or
+        mpv went on to it by itself."""
+        self._playable = playable
+        self._refresh_readout()
+        # PipeWire can switch graph rate when playback starts. Query it off
+        # the UI thread after handing the URL to mpv.
+        self._refresh_sink_worker()
+        self.status = _("reproduciendo {label}").format(label=entry.label)
+        if getattr(playable, "downgraded", False):
+            # Say it out loud. The badge shows what arrived, which on its own
+            # reads as if it were what we asked for.
+            self.status = _("{status} · TIDAL entregó {got}, no {asked}").format(
+                status=self.status, got=playable.quality, asked=playable.requested
+            )
+
+    @staticmethod
+    def _codec_label(playable: Playable) -> str:
+        codec = (playable.codec or "").lower()
+        if codec.startswith("mp4a") or codec == "aac":
+            return "AAC"
+        return codec.upper() or ("AAC" if playable.quality in {"LOW", "HIGH"} else "FLAC")
+
+    def _playback_label(self) -> str:
+        if self.mpv.paused and not self.mpv.idle:
+            return _("pausa").upper()
+        if self._playable is not None and self.queue.current is not None:
+            return _("reproduciendo").upper()
+        return _("detenido").upper()
+
+    def _track_meta(self) -> str:
+        """Artist, album and year of what is playing, one per line.
+
+        Never wrapped: the column is 24 cells wide and a wrapped album title
+        would push the year out of the band. A line that does not fit glides
+        to show the rest (`Glide`) instead of being cut off for good.
+        """
+        entry = self.queue.current
+        if entry is None:
+            return ""
+        tail = " · ".join(
+            part for part in (str(entry.year) if entry.year else "", entry.length) if part
+        )
+        lines = [entry.artist, entry.album, tail]
+        return "\n".join(line for line in lines if line)
+
+    def _refresh_track_meta(self) -> None:
+        """Write the block under the clock. Separate from the readout because
+        it is known the moment a track starts, while the codec line waits for
+        the stream to resolve."""
+        if self.query("#trackmeta"):
+            self.query_one("#trackmeta", Glide).update(self._track_meta())
+
+    def _refresh_readout(self) -> None:
+        """Redraw source, analyser and playback state from cached values."""
+        if not self.query("#badges"):
+            return
+        self._refresh_track_meta()
+        analyzer = self._analyzer()
+        playable = self._playable
+        if playable is None:
+            source = f"SRC  — · {analyzer.source} · {self._playback_label()}"
+        else:
+            quality = columns.QUALITY_LABELS.get(playable.quality, playable.quality)
+            source = (
+                f"SRC  {self._codec_label(playable)} · {playable.kbps} · "
+                f"{playable.khz} kHz · {quality} · {analyzer.source} · "
+                f"{self._playback_label()}"
+            )
+            source += self._gain_badge(playable)
+        self.query_one("#badges", Glide).update(source)
+        self._refresh_output_line()
+
+    def _refresh_output_line(self) -> None:
+        sink = self._sink
+        if not sink.known:
+            line = "OUT  —"
+        else:
+            parts = [sink.description or sink.name]
+            if sink.sample_format:
+                parts.append(f"PCM {sink.sample_format.upper()}")
+            if sink.rate:
+                parts.append(f"{sink.rate / 1000:g} kHz")
+            if sink.rate and self._stream_rate and self._stream_rate != sink.rate:
+                parts.append(
+                    _("resampling desde {rate} kHz").format(
+                        rate=f"{self._stream_rate / 1000:g}"
+                    )
+                )
+            line = "OUT  " + " · ".join(parts)
+        self.query_one("#output", Glide).update(line)
+
+    @work(thread=True, exclusive=True, group="audio-output")
+    def _refresh_sink_worker(self) -> None:
+        """Follow the sink until it settles on the rate this track will use.
+
+        PipeWire only switches the graph rate once mpv opens the device, and
+        mpv only opens it after fetching and decoding enough of the stream —
+        a good deal later than the quarter second this used to wait. Reading
+        `pactl` once, that early, reports the rate of the *previous* track:
+        the badge said 44.1 kHz while the DAC's own screen read 96K. So poll
+        instead of guessing a delay, and publish each change as it lands.
+
+        Nor does PipeWire switch at all while the device is running, and
+        between tracks it always is: mpv reopens its output in milliseconds.
+        The first track after a restart set the rate and every later one was
+        resampled to it. When mpv and the sink disagree, the rate is forced
+        until the sink follows, then handed back.
+        """
+        worker = get_current_worker()
+        deadline = time.monotonic() + SINK_SETTLE
+        last: tuple[audio.Sink, int] | None = None
+        forced = 0
+        try:
+            while not worker.is_cancelled:
+                sink = audio.sink()
+                stream = self.mpv.samplerate
+                if (sink, stream) != last:
+                    last = (sink, stream)
+                    self.call_from_thread(self._set_sink, sink, stream)
+                if forced and sink.rate == forced:
+                    audio.force_rate(0)
+                    forced = 0
+                elif not forced and stream and sink.rate and stream != sink.rate:
+                    target = audio.rate_to_force(
+                        sink,
+                        stream,
+                        audio.allowed_rates(),
+                        audio.hardware_rates(sink.name),
+                        audio.streams_on(sink),
+                    )
+                    if target and audio.force_rate(target):
+                        log.info("forzando %s Hz: el sink iba a %s Hz", target, sink.rate)
+                        forced = target
+                if time.monotonic() >= deadline:
+                    return
+                time.sleep(SINK_POLL)
+        finally:
+            if forced:
+                audio.force_rate(0)
+
+    def _set_sink(self, sink: audio.Sink, stream_rate: int = 0) -> None:
+        self._sink = sink
+        self._stream_rate = stream_rate
+        self._refresh_output_line()
+
+    # ----------------------------------------------------------------- fiddles
+
+    def action_seek_back(self) -> None:
+        self.mpv.seek(-5, "relative")
+
+    def action_seek_fwd(self) -> None:
+        self.mpv.seek(5, "relative")
+
+    def action_vol_up(self) -> None:
+        self.mpv.volume = self.mpv.volume + 5
+
+    def action_vol_down(self) -> None:
+        self.mpv.volume = self.mpv.volume - 5
+
+    def _lyrics_for(self, entry: Entry) -> LyricsDocument:
+        cached = self._lyrics_cache.get(entry.id)
+        if cached is not None:
+            return cached
+        ensure_fresh(self.session)
+        track = with_retries(lambda: entry.resolve(self.session))
+        document = load_lyrics(track)
+        self._lyrics_cache[entry.id] = document
+        return document
+
+    def _follow_lyrics(self, position: float) -> None:
+        """Keep the split view's lyrics on the playing track and line.
+
+        The fetch happens once per track, in a worker, through the same cache
+        `y` uses; everything else is the pane comparing line numbers.
+        """
+        pane = self.query_one(LyricsPane)
+        entry = self.queue.current
+        wanted = entry.id if entry is not None else None
+        if wanted != self._pane_entry:
+            self._pane_entry = wanted
+            if entry is None:
+                pane.show(None, _("no hay una pista reproduciéndose"))
+            else:
+                pane.show(None, _("buscando la letra…"))
+                self._pane_worker(entry)
+        pane.follow(position, self.mpv.duration)
+
+    @work(thread=True, exclusive=True, group="pane-lyrics")
+    def _pane_worker(self, entry: Entry) -> None:
+        try:
+            document = self._lyrics_for(entry)
+        except Exception as exc:
+            self.call_from_thread(self._pane_loaded, entry.id, None, str(exc))
+            return
+        self.call_from_thread(self._pane_loaded, entry.id, document, "")
+
+    def _pane_loaded(
+        self, entry_id: int, document: LyricsDocument | None, message: str
+    ) -> None:
+        # The track moved on while its lyrics were in flight.
+        if entry_id != self._pane_entry:
+            return
+        self.query_one(LyricsPane).show(document, message)
+
+    def action_lyrics(self) -> None:
+        if self.queue.current is None:
+            self.status = _("no hay una pista reproduciéndose")
+            return
+        self.push_screen(
+            LyricsScreen(
+                lambda: self.queue.current,
+                self._lyrics_for,
+                lambda: self.mpv.position,
+            )
+        )
+
+    def action_equalizer(self) -> None:
+        self.push_screen(EqScreen(self.settings, self._apply_audio), self._eq_closed)
+
+    def action_fullscreen(self) -> None:
+        """The cover as large as the terminal allows, a bar under it, and the
+        queue beside it on demand. Only from the player itself; pressed again
+        in the view, it closes it, as esc does."""
+        if isinstance(self.screen, FullscreenScreen):
+            self.screen.action_close()
+            return
+        if len(self.screen_stack) > 1:
+            return
+        if self.size.width < self.MIN_WIDTH or self.size.height < self.MIN_HEIGHT:
+            self.status = _(
+                "la pantalla completa necesita al menos {width}×{height}"
+            ).format(width=self.MIN_WIDTH, height=self.MIN_HEIGHT)
+            return
+        self.push_screen(FullscreenScreen())
+
+    def _fullscreen(self) -> FullscreenScreen | None:
+        """The full-screen view, if it is anywhere on the stack."""
+        return next(
+            (
+                screen
+                for screen in self.screen_stack
+                if isinstance(screen, FullscreenScreen)
+            ),
+            None,
+        )
+
+    def _queue_hidden(self) -> bool:
+        """True while the full-screen view is in front with its queue closed.
+
+        The queue keys act on the player's cursor, which that view shows in
+        its panel. With the panel closed they would act on a row nobody can
+        see, so they ask for it instead.
+        """
+        screen = self.screen
+        if isinstance(screen, FullscreenScreen) and not screen.queue_open:
+            self.status = _("abre la cola con tab para eso")
+            return True
+        return False
+
+    def action_speed(self) -> None:
+        self.push_screen(SpeedScreen(self.mpv.speed), self._speed_chosen)
+
+    def _speed_chosen(self, speed: float | None) -> None:
+        if speed is None or speed == self.mpv.speed:
+            return
+        self.mpv.speed = speed
+        self.status = _("velocidad: {value}").format(value=speed_text(speed))
+        self._refresh_modes()
+
+    def action_config(self) -> None:
+        self.push_screen(ConfigScreen(self._setting_changed))
+
+    def _setting_changed(self, name: str) -> None:
+        """Apply what can be applied without a restart, and say what cannot."""
+        if name == "quality":
+            # The session carries the quality it asks TIDAL for; the next
+            # track resolved picks the new one up.
+            session_config = getattr(self.session, "config", None)
+            if session_config is not None:
+                with contextlib.suppress(Exception):
+                    session_config.quality = tidalapi.Quality(config.DEFAULT_QUALITY)
+            self.status = _("calidad: {value}").format(value=config.DEFAULT_QUALITY)
+        elif name == "language":
+            i18n.refresh()
+            self.status = _("el idioma cambia al reiniciar tidalamp")
+        elif name == "artwork":
+            self._reload_art()
+            self.status = _("carátula: {value}").format(value=config.ARTWORK)
+        elif name == "cover_shape":
+            self._reshape_art()
+            # The full-screen view cuts its own cover, to the old shape.
+            fullscreen = self._fullscreen()
+            if fullscreen is not None:
+                fullscreen.reload_cover()
+            self.status = _("forma de la carátula: {value}").format(
+                value=config.COVER_SHAPE
+            )
+        elif name == "theme":
+            self._apply_appearance()
+            self.status = _("tema: {value}").format(value=theme_label(config.THEME))
+        elif name == "palette":
+            self.tidalamp_palette = load_palette(name=config.PALETTE)
+            self.refresh_css(animate=False)
+            self._apply_appearance()
+            self.status = _("paleta: {value}").format(value=theme_label(config.PALETTE))
+        elif name == "backdrop":
+            self._apply_emblem()
+            self.status = _("fondo de la cola: {value}").format(
+                value=theme_label(config.BACKDROP)
+            )
+        elif name == "arrangement":
+            self._check_size()
+            if config.ARRANGEMENT == "split" and not self.split:
+                self.status = _(
+                    "split necesita al menos {width}×{height}; la cola sigue debajo"
+                ).format(width=self.SPLIT_MIN_WIDTH, height=self.SPLIT_MIN_HEIGHT)
+            else:
+                self.status = _("disposición: {value}").format(value=config.ARRANGEMENT)
+        elif name == "visualizer":
+            self._apply_visualizer()
+            self.status = _("visualizador: {value}").format(value=config.VISUALIZER)
+        elif name == "columns":
+            # RowList reads the setting at render time, so the queue only
+            # needs telling to draw itself again — no reload, and the browser
+            # underneath a modal gets the same treatment.
+            for screen in self.screen_stack:
+                for widget in screen.query(RowList):
+                    widget.refresh()
+            self.status = _("columnas: {count}").format(count=len(config.COLUMNS))
+        elif name == "replaygain":
+            if self._playable is not None and self.queue.current is not None:
+                self.mpv.gain = self._gain_for(self._playable)
+            # The track queued for a gapless start carries the old gain as
+            # its own option; it is resolved and queued again at the new one.
+            self._drop_prepared()
+            self._refresh_readout()
+            self.status = _("volumen normalizado: {value}").format(
+                value=config.REPLAYGAIN
+            )
+        elif name == "library_view":
+            # The browser reads it when it shows a level: nothing to redraw.
+            self.status = _("vista de la biblioteca: {value}").format(
+                value=config.LIBRARY_VIEW
+            )
+        elif name == "autoplay":
+            self.status = (
+                _("reproducción automática activada")
+                if config.AUTOPLAY
+                else _("reproducción automática desactivada")
+            )
+        elif name == "transparency":
+            # Each screen by the one under it, as `push_screen` decided: the
+            # settings opened over the full-screen view stay opaque.
+            stack = self.screen_stack
+            for index, screen in enumerate(stack):
+                see_through = (
+                    self._see_through(below=stack[index - 1])
+                    if index
+                    else config.TRANSPARENCY
+                )
+                screen.set_class(see_through, "transparent")
+            self.status = (
+                _("transparencia activada")
+                if config.TRANSPARENCY
+                else _("transparencia desactivada")
+            )
+        elif name == "debug":
+            self.status = _("debug log: {value}").format(
+                value=_("activado") if config.DEBUG else _("desactivado")
+            )
+
+    def action_help(self) -> None:
+        # keys_for, not DEFAULT_KEYS: the screen has to show what the user's
+        # own config file rebound, not what shipped.
+        self.push_screen(HelpScreen(keys_for))
+
+    def _eq_closed(self, _result: None) -> None:
+        self._saved(self.settings.save())
+        self.status = (
+            _("ecualizador activo") if self.settings.eq_active else _("ecualizador plano")
+        )
+
+    def _nudge_balance(self, delta: float) -> None:
+        self._set_balance(self.settings.balance + delta)
+
+    def _set_balance(self, requested: float) -> None:
+        value = self.settings.set_balance(requested)
+        self._apply_audio()
+        self._saved(self.settings.save())
+        side = (
+            _("centro")
+            if value == 0
+            else (
+                f"{abs(int(value * 100))}% "
+                + (_("izquierda") if value < 0 else _("derecha"))
+            )
+        )
+        self.status = _("balance: {value}").format(value=side)
+
+    def action_balance_left(self) -> None:
+        self._nudge_balance(-0.1)
+
+    def action_balance_right(self) -> None:
+        self._nudge_balance(0.1)
+
+    def action_balance_centre(self) -> None:
+        self._set_balance(0.0)
+
+    def action_favourite(self) -> None:
+        self._favourite_selected(True)
+
+    def action_unfavourite(self) -> None:
+        self._favourite_selected(False)
+
+    def _favourite_selected(self, add: bool) -> None:
+        """Favourite the track under the playlist cursor."""
+        if self._queue_hidden():
+            return
+        row = self.query_one("#playlist", RowList).current
+        if row is None or row.entry is None:
+            self.status = _("no hay ninguna pista seleccionada")
+            return
+        self._favourite_row(row, add)
+
+    def _favourite_entry(self, entry: Entry) -> None:
+        """Favourite one entry, for the browser's action menu."""
+        self._favourite_row(Row(label=entry.label, entry=entry), True)
+
+    def _favourite_row(self, row: Row, add: bool) -> None:
+        self.query_one("#busy", Spinner).start(
+            _("añadiendo a favoritos…") if add else _("quitando de favoritos…")
+        )
+        self._favourite_worker(row, add)
+
+    @work(thread=True, exclusive=True, group="favourite")
+    def _favourite_worker(self, row: Row, add: bool) -> None:
+        try:
+            message = favourite_message(self.session, row, add)
+        except Exception as exc:
+            self.call_from_thread(
+                self._favourite_done, _("favoritos: {error}").format(error=exc)
+            )
+            return
+        self.call_from_thread(self._favourite_done, message)
+
+    def _favourite_done(self, message: str) -> None:
+        self.query_one("#busy", Spinner).stop()
+        self.status = message
+        # Whatever favourites level is cached is now out of date.
+        for level in ("fav:tracks", "fav:albums", "fav:artists"):
+            library.forget(level)
+
+    def action_toggle_time(self) -> None:
+        clock = self.query_one(TimeDisplay)
+        clock.countdown = not clock.countdown
+
+    async def action_quit(self) -> None:
+        """Ask before closing: `q` sits right next to `w`, and a slip from
+        the full-screen key closed the player. The cursor starts on «cancel»;
+        `q` again with the question open means yes."""
+        if self._quit_question is not None and self.screen is self._quit_question:
+            self._quit_question.dismiss("quit")
+            return
+        self._quit_question = ChoiceScreen(
+            _("¿SALIR DE TIDALAMP?"),
+            [("quit", _("salir")), ("cancel", _("cancelar"))],
+            cursor=1,
+            # The quit key again means yes; the app's binding cannot hear it
+            # with this window in front.
+            keys=tuple(key.strip() for key in keys_for("quit").split(",")),
+            key_value="quit",
+        )
+        self.push_screen(self._quit_question, self._quit_answered)
+
+    def _quit_answered(self, answer: object) -> None:
+        self._quit_question = None
+        if answer == "quit":
+            self.quit_now()
+
+    def quit_now(self) -> None:
+        """Close the player without asking, the way «salir» does once asked."""
+        self.run_worker(self._close_player(), exclusive=False)
+
+    async def action_force_quit(self) -> None:
+        # Async because Textual's own action_quit is: saving the queue, closing
+        # mpv and dropping off the bus are things to finish, not to fire off.
+        await self._close_player()
+
+    def _remember_position(self) -> None:
+        """Where the track was, for the next session to pick up at.
+
+        Written once, on the way out: from the tick it would rewrite the
+        queue ten times a second. A crash therefore keeps the second of the
+        last clean quit, not of the crash. A track restored and never played
+        this session keeps the second it was restored with.
+        """
+        self.queue.position = 0.0
+        current = self.queue.current
+        if current is not None:
+            seconds = self._last_position
+            # Quit while it reloads, after a restart or a play on a restored
+            # track: mpv says 0:00 because it has not opened it yet, and the
+            # second it is on its way to is the one worth keeping.
+            if seconds <= 1 and self._resume is not None and self._resume[0] is current:
+                seconds = self._resume[1]
+            if seconds > 1:
+                self.queue.position = seconds
+            return
+        if self._resume is None:
+            return
+        entry, seconds = self._resume
+        index = next((i for i, row in enumerate(self.queue) if row is entry), -1)
+        if index >= 0:
+            self.queue.playing = index
+            self.queue.position = seconds
+
+    def _restore_position(self) -> None:
+        """Pick up the second the last session quit at, once that track plays.
+
+        Not at once: a restored queue never starts playing by itself, and an
+        idle mpv read as a track that ended would move the queue on. The
+        second waits in `_resume` for `_start`, the same way a restarted mpv
+        goes back to its track, and anything else played first drops it.
+        """
+        index, seconds = self.queue.resume_at, self.queue.resume_position
+        if not 0 <= index < len(self.queue) or seconds <= 1:
+            return
+        entry = self.queue[index]
+        self._resume = (entry, seconds)
+        self.status = _(
+            "cola restaurada ({count} pistas); «{title}» sigue en {time}"
+        ).format(
+            count=len(self.queue),
+            title=entry.title,
+            time=f"{int(seconds) // 60}:{int(seconds) % 60:02d}",
+        )
+
+    async def _close_player(self) -> None:
+        """Save, let go of mpv and the bus, and exit.
+
+        Not `_shutdown`: that is Textual's own, the one that closes the screens
+        and the driver once the app exits, and a method of that name here
+        replaced it rather than running before it.
+        """
+        if not self.forget_on_exit:
+            self._remember_position()
+            self._saved(self.queue.save())
+            self._saved(self.settings.save())
+        if self._mpris_ready:
+            await self.mpris.stop()
+        self._stop_spectrum()
+        self.mpv.close()
+        cleanup_playlists()
+        if self.forget_on_exit:
+            auth.logout(self.forget_on_exit)
+        self.exit()
+
+    # ------------------------------------------------------------------ MPRIS
+
+    def mpris_status(self) -> str:
+        if self.queue.current is None or self.mpv.idle:
+            return "Stopped"
+        return "Paused" if self.mpv.paused else "Playing"
+
+    def mpris_metadata(self) -> dict:
+        entry = self.queue.current
+        return {} if entry is None else _entry_metadata(entry)
+
+    def mpris_track_ids(self) -> list[str]:
+        """Just the ids, which is all the TrackList property and the diff need."""
+        return [_track_path(entry) for entry in self.queue]
+
+    def mpris_tracks(self) -> list[dict]:
+        """The whole queue, in visible order, for ``GetTracksMetadata``."""
+        return [_entry_metadata(entry) for entry in self.queue]
+
+    def mpris_go_to(self, track_id: str) -> None:
+        for index, entry in enumerate(self.queue):
+            if _track_path(entry) == track_id:
+                self._play_index(index)
+                return
+
+    def mpris_position(self) -> float:
+        return self.mpv.position
+
+    def mpris_volume(self) -> float:
+        # MPRIS volume is 0.0-1.0; mpv's is a percentage.
+        return self.mpv.volume / 100.0
+
+    def mpris_set_volume(self, value: float) -> None:
+        ceiling = Mpv.VOLUME_MAX / 100.0
+        self.mpv.volume = int(max(0.0, min(ceiling, value)) * 100)
+
+    def mpris_rate(self) -> float:
+        return self.mpv.speed
+
+    def mpris_set_rate(self, value: float) -> None:
+        """A desktop's speed, rounded to the nearest of the window's quarters.
+
+        MPRIS says a rate of 0 must not be set (a client should pause
+        instead), and mpv takes nothing at or below 0, so those are ignored.
+        """
+        if value <= 0:
+            return
+        speed = min(Mpv.SPEEDS, key=lambda candidate: abs(candidate - value))
+        self._speed_chosen(speed)
+
+    def mpris_can_go_next(self) -> bool:
+        return self.queue.has_next()
+
+    def mpris_can_go_previous(self) -> bool:
+        return self.queue.has_prev()
+
+    def mpris_loop_status(self) -> str:
+        return self.queue.repeat.value
+
+    def mpris_set_loop_status(self, value: str) -> None:
+        try:
+            self.queue.repeat = Repeat(value)
+        except ValueError:
+            return
+        self._saved(self.queue.save())
+        self._refresh_modes()
+
+    def mpris_shuffle(self) -> bool:
+        return self.queue.shuffle
+
+    def mpris_set_shuffle(self, value: bool) -> None:
+        self.queue.shuffle = value
+        self._saved(self.queue.save())
+        self._refresh_modes()
+
+    def mpris_play(self) -> None:
+        if self.mpv.paused:
+            self.mpv.toggle_pause()
+        else:
+            self.action_play()
+
+    def mpris_pause(self) -> None:
+        if not self.mpv.paused:
+            self.mpv.toggle_pause()
+
+    def mpris_play_pause(self) -> None:
+        self._toggle_pause()
+
+    def mpris_stop(self) -> None:
+        self.action_stop()
+
+    def mpris_next(self) -> None:
+        self.action_next()
+
+    def mpris_previous(self) -> None:
+        self.action_prev()
+
+    def mpris_seek(self, offset: float) -> None:
+        self.mpv.seek(offset, "relative")
+        self.mpris.seeked(self.mpv.position)
+
+    def mpris_set_position(self, position: float) -> None:
+        self.mpv.seek(position, "absolute")
+        self.mpris.seeked(position)
+
+    def mpris_quit(self) -> None:
+        # Comes in on the bus, not from the keyboard: hand the shutdown to the
+        # loop rather than awaiting it inside a D-Bus method call.
+        self.run_worker(self._close_player(), exclusive=False)

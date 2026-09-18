@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=TidalAmp
+GenericName=Music Player
+GenericName[es]=Reproductor de música
+Comment=TIDAL client for the terminal with a retro interface
+Comment[es]=Cliente de TIDAL para terminal con interfaz retro
+Exec=tidalamp tui
+Icon=tidalamp
+Terminal=true
+Categories=AudioVideo;Audio;Player;ConsoleOnly;
+Keywords=tidal;music;player;flac;mpris;
+Keywords[es]=tidal;música;reproductor;flac;mpris;
+StartupNotify=false

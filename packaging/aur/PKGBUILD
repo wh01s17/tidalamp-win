@@ -1,0 +1,48 @@
+# Maintainer: wh01s17 <joja.perezo@gmail.com>
+pkgname=tidalamp
+pkgver=0.13.0
+pkgrel=1
+pkgdesc="Terminal TIDAL client with a retro interface and hi-res playback"
+arch=('any')
+url="https://github.com/wh01s17/tidalamp"
+license=('GPL-3.0-or-later')
+depends=(
+  'python'
+  'python-tidalapi'
+  'python-textual'
+  'python-typer'
+  'python-dbus-fast'
+  'python-requests'
+  'mpv'
+)
+optdepends=(
+  'cava: real spectrum analyzer instead of the RMS meter'
+  'python-pillow: album cover art in the display'
+)
+makedepends=('python-build' 'python-installer' 'python-wheel' 'python-hatchling')
+checkdepends=('python-pytest')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+# SKIP hasta que el tag exista; después, rellenar con `updpkgsums`.
+sha256sums=('87a8c8f3cc0ffd1889040414cdba21df15251cdab921ab0ac38422b6f1bd7f2f')
+
+build() {
+  cd "$srcdir/$pkgname-$pkgver"
+  python -m build --wheel --no-isolation
+}
+
+check() {
+  cd "$srcdir/$pkgname-$pkgver"
+  python -m pytest
+}
+
+package() {
+  cd "$srcdir/$pkgname-$pkgver"
+  python -m installer --destdir="$pkgdir" dist/*.whl
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  # MPRIS publishes DesktopEntry=tidalamp; without these two the desktop has
+  # a player it cannot name or draw an icon for.
+  install -Dm644 packaging/tidalamp.desktop \
+    "$pkgdir/usr/share/applications/$pkgname.desktop"
+  install -Dm644 tidalamp/tidalamp.svg \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/$pkgname.svg"
+}
